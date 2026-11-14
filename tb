@@ -1,19 +1,25 @@
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
+
 pcall(setrobloxinput, true)
+
 local MOUSE_Y_OFFSET = 0 -- shots landing ~58px above cursor? set 58
+
 local CFG = {
     tb_enabled = true,
     tb_key = 0x06,
     tb_kbmode = "hold",
+
     tb_visualize = false,
     tb_hitbox_x = 1.0,
     tb_hitbox_y = 2.0,
     tb_maxdist = 0,
+
     tb_sticky = false,
     tb_selkey = 0,
     tb_unselkey = 0,
     tb_selvis = true,
+
     tb_pred = false,
     tb_dist_pred = false,
     tb_close_dist = 20,
@@ -27,6 +33,7 @@ local CFG = {
     tb_pred_x = 0.15,
     tb_pred_y = 0.15,
     tb_pred_smooth = 0.4,
+
     tb_humanize = false,
     tb_delay_min = 30,
     tb_delay_max = 120,
@@ -38,19 +45,41 @@ local CFG = {
     tb_hes_min = 150,
     tb_hes_max = 450,
     tb_fatigue = 8,
+
     tb_knock = true, -- skip knocked (K.O) players
+
     tb_wepcheck = false,
     tb_rev_on = true, tb_rev_dist = 300,
     tb_db_on = true, tb_db_dist = 120,
     tb_tac_on = true, tb_tac_dist = 150,
+
+    gm_on = false,
+    gm_key = 0x46,
+    gm_mode = "toggle",
+    gm_delay = 60,
+    gm_method = "keys",
+    gm_link = false,
+    gm_link_ms = 0,
+    gm_ammo = true,
+    gm_drop = false,
+    gm_rev = true,
+    gm_db = true,
+    gm_tac = true,
+    gm_rev_slot = 1,
+    gm_db_slot = 2,
+    gm_tac_slot = 3,
 }
+
 local function v(id)
     return CFG[id]
 end
+
 local SNAP_KEYS = {}
 for k in pairs(CFG) do SNAP_KEYS[#SNAP_KEYS + 1] = k end
+
 local cfgSnap, cfgSnapAt = nil, 0
 local CFG_SNAP_TTL = 0.2
+
 local function cfg(id)
     local now = tick()
     if not cfgSnap or now - cfgSnapAt > CFG_SNAP_TTL then
@@ -60,8 +89,10 @@ local function cfg(id)
     end
     return cfgSnap[id]
 end
+
 local UIS = nil
 pcall(function() UIS = game:GetService("UserInputService") end)
+
 local MOUSE_FN = {
     [0x01] = ismouse1pressed,
     [0x02] = ismouse2pressed,
@@ -75,6 +106,7 @@ local function vkHeld(vk)
         local ok, r = pcall(fn)
         if ok then return r == true end
     end
+    -- side buttons are also plain VK codes, so ask the keyboard check too
     local ok, r = pcall(iskeypressed, vk)
     if ok and r == true then return true end
     if UIS and UIS.IsKeyDown then
@@ -83,6 +115,7 @@ local function vkHeld(vk)
     end
     return false
 end
+
 local kbOn, kbPrev = false, false
 local function keyActive()
     local mode = CFG.tb_kbmode
@@ -95,28 +128,36 @@ local function keyActive()
     end
     return held
 end
+
 local function windowActive()
     local ok, r = pcall(isrbxactive)
     if ok then return r == true end
     return true
 end
+
 local function dist2(ax, ay, bx, by)
     local dx, dy = ax - bx, ay - by
     return math.sqrt(dx * dx + dy * dy)
 end
+
 local function dist3(a, b)
     local dx, dy, dz = a.X - b.X, a.Y - b.Y, a.Z - b.Z
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
+
 local SELECTED, SELVIS = {}, {}
 local prevSelKey, prevUnselKey = false, false
+
+-- instance userdata gets rewrapped between frames, key on Address
 local function selKey(t)
     local ok, a = pcall(function() return t.character.Address end)
     return ok and a or t.character
 end
+
 local function addSel(t)
     if t and t.character then SELECTED[selKey(t)] = t end
 end
+
 local function remSel(t)
     local k = t and t.character and selKey(t)
     if not k then return end
@@ -127,9 +168,12 @@ local function remSel(t)
         pcall(function() sv.txt:Remove() end)
     end
 end
+
 local function selOk(t)
     return not cfg("tb_sticky") or SELECTED[selKey(t)] ~= nil
 end
+
+-- reuse the stored target's rootName when resolving a selection's root
 local function selRoot(ch, t)
     local h = t and t.hrp
     if h then
@@ -140,12 +184,20 @@ local function selRoot(ch, t)
     if t then t.hrp = h end
     return h
 end
+
 local function pruneSel()
+    -- safety: storing/removing keys mid-iteration raises
+    -- "invalid key to 'next'" and kills the loop; collect the
+    -- changes from this pass and apply them after pairs() ends
     local pending = {}
     for k, t in pairs(SELECTED) do
         local ok, alive = pcall(function() return t.character.Parent ~= nil end)
         if ok and alive then
+            -- still up
         elseif t.player then
+            -- player-linked picks stay through death, wait for respawn...
+            -- unless the player left the game entirely; nobody respawns then
+            -- and the pick (plus its visuals) would sit frozen forever
             local okGone, gone = pcall(function() return t.player.Parent == nil end)
             if okGone and gone then
                 pending[#pending + 1] = { key = k, drop = true, t = t }
@@ -175,6 +227,7 @@ local function pruneSel()
         end
     end
 end
+
 local function updateSelVis(cam, lens)
     for k, t in pairs(SELECTED) do
         local sv = SELVIS[k]
@@ -190,6 +243,10 @@ local function updateSelVis(cam, lens)
         end
         local show, pos = false
         local hrp = cfg("tb_selvis") and cfg("tb_sticky") and selRoot(t.character, t)
+        -- a destroyed char still answers FindFirstChild with parts parented to
+        -- nothing, and Position still reads, so a despawned pick would keep
+        -- painting its last spot; only draw while the root is really in the
+        -- character (the respawn-reseat in pruneSel swaps it over fresh)
         if hrp then
             local okUp, inTree = pcall(function() return hrp.Parent ~= nil end)
             if not (okUp and inTree) then hrp = nil end
@@ -214,17 +271,24 @@ local function updateSelVis(cam, lens)
         sv.box.Visible, sv.txt.Visible = show, show
     end
 end
+
 local LOCKED, TRACK_CHAR, TRACK_POS = nil, nil, nil
 local TRACK_T = 0
 local TRACKED_VEL = Vector3.new(0, 0, 0)
+
 _G.StellarTriggerbot = _G.StellarTriggerbot or {}
 _G.StellarTriggerbot.LockedTarget = nil
 _G.StellarTriggerbot.TargetPosition = nil
+
+-- engagement state
 local insideSince, entryDelay = nil, 0
 local lastClick, nextClickIn = 0, 0
+local lastFireAt = 0 -- last moment the trigger actually fired, read by the gun macro
+local tbEngaged = false -- true while a target is under the crosshair and the trigger is live
 local pendingRelease, shotCount = 0, 0
 local pauseUntil, stickyUntil = 0, 0
 local wallBlocked, wallCheckAt = false, 0
+
 local function resetEngagement()
     insideSince = nil
     shotCount = 0
@@ -233,6 +297,7 @@ local function resetEngagement()
     wallBlocked = false
     stickyUntil = 0
 end
+
 local function resetLock()
     LOCKED = nil
     TRACK_CHAR = nil
@@ -241,9 +306,11 @@ local function resetLock()
     resetEngagement()
     _G.StellarTriggerbot.LockedTarget = nil
 end
+
 local function localPlayer()
     return Players.LocalPlayer
 end
+
 local function cursorPos()
     local lp = localPlayer()
     if lp then
@@ -258,19 +325,23 @@ local function cursorPos()
     end
     return 0, 0
 end
+
 local function localRootPos()
     local lp = localPlayer()
     local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
     return hrp and hrp.Position or Vector3.new(0, 0, 0)
 end
+
 local function randRange(a, b)
     a, b = tonumber(a) or 0, tonumber(b) or 0
     if b < a then a, b = b, a end
     return a + math.random() * (b - a)
 end
+
 local function cross2d(o, a, b)
     return (a.X - o.X) * (b.Y - o.Y) - (a.Y - o.Y) * (b.X - o.X)
 end
+
 local function convexHull(pts)
     table.sort(pts, function(a, b)
         return a.X < b.X or (a.X == b.X and a.Y < b.Y)
@@ -298,6 +369,7 @@ local function convexHull(pts)
     end
     return lower
 end
+
 local function pointInPolygon(poly, px, py)
     local inside = false
     local j = #poly
@@ -311,6 +383,7 @@ local function pointInPolygon(poly, px, py)
     end
     return inside
 end
+
 local function distToSeg(px, py, ax, ay, bx, by)
     local dx, dy = bx - ax, by - ay
     local len2 = dx * dx + dy * dy
@@ -318,6 +391,7 @@ local function distToSeg(px, py, ax, ay, bx, by)
     local ex, ey = px - (ax + t * dx), py - (ay + t * dy)
     return math.sqrt(ex * ex + ey * ey)
 end
+
 local function nearPolygonEdge(poly, px, py, margin)
     local j = #poly
     for i = 1, #poly do
@@ -328,6 +402,8 @@ local function nearPolygonEdge(poly, px, py, margin)
     end
     return false
 end
+
+-- 8 corners of the world-space hitbox
 local function getCorners(pos, size)
     local c, idx = {}, 1
     for xi = -1, 1, 2 do
@@ -340,11 +416,13 @@ local function getCorners(pos, size)
     end
     return c
 end
+
 local EDGES = {
     { 1, 2 }, { 3, 4 }, { 5, 6 }, { 7, 8 },
     { 1, 3 }, { 2, 4 }, { 5, 7 }, { 6, 8 },
     { 1, 5 }, { 2, 6 }, { 3, 7 }, { 4, 8 },
 }
+
 local function rootOf(t)
     local h = t.hrp
     if h then
@@ -355,7 +433,9 @@ local function rootOf(t)
     t.hrp = h
     return h
 end
+
 local knifeAt, knifeCached = 0, false
+
 local function knifeOut()
     local now = tick()
     if now - knifeAt > 0.2 then
@@ -366,6 +446,12 @@ local function knifeOut()
     end
     return knifeCached
 end
+
+-- knock check: characters in ZHD (place 138014591158268) carry a
+-- BodyEffects folder with a BoolValue named "K.O" that is true for as long
+-- as the player is knocked on the floor. The check stays generic: no folder
+-- or failed read = not knocked, so it is drop-in portable to Da Hood /
+-- other hood clones, and harmless in games without the flag.
 local function isKnocked(ch)
     if not ch then return false end
     local ok, be = pcall(function() return ch:FindFirstChild("BodyEffects") end)
@@ -375,16 +461,20 @@ local function isKnocked(ch)
     local ok3, v2 = pcall(function() return ko.Value end)
     return ok3 and v2 == true
 end
+
+-- distance cap for whichever weapon is currently held
 local function heldToolName()
     local lp = localPlayer()
     local char = lp and lp.Character
     local ok, name = pcall(function()
         for _, d in ipairs(char:GetChildren()) do
+            -- IsA lies on this executor, compare ClassName directly
             if d.ClassName == "Tool" then return d.Name end
         end
     end)
     return ok and name or nil
 end
+
 local function wepCap()
     local base = cfg("tb_maxdist") or 0
     if not cfg("tb_wepcheck") then return base end
@@ -403,7 +493,9 @@ local function wepCap()
     if base <= 0 then return cap end
     return math.min(base, cap)
 end
+
 local camLens, camLensAt = nil, 0
+
 local function lensInfo()
     local now = tick()
     if not camLens or now - camLensAt > 0.5 then
@@ -417,6 +509,7 @@ local function lensInfo()
     end
     return camLens
 end
+
 local function makeTarget(character, player, rootName)
     return {
         character = character,
@@ -425,15 +518,19 @@ local function makeTarget(character, player, rootName)
         hrp = character and character:FindFirstChild(rootName or "HumanoidRootPart"),
     }
 end
+
 local targetCache, targetCacheAt = nil, 0
 local TARGET_CACHE_TTL = 0.2
+
 local function invalidateTargets()
     targetCache = nil
 end
+
 local function buildTargets()
     local out = {}
     local lp = localPlayer()
     local placeId = game.PlaceId
+
     if placeId == 3233893879 then
         local chars = Workspace:FindFirstChild("Characters")
         if chars then
@@ -472,6 +569,7 @@ local function buildTargets()
             end
         end
     end
+
     local folder = Workspace:FindFirstChild("Bot") or Workspace:FindFirstChild("Bots")
     if folder then
         for _, inst in ipairs(folder:GetChildren()) do
@@ -495,8 +593,10 @@ local function buildTargets()
             end
         end
     end
+
     return out
 end
+
 local function collectTargets()
     local now = tick()
     if not targetCache or now - targetCacheAt > TARGET_CACHE_TTL then
@@ -505,6 +605,7 @@ local function collectTargets()
     end
     return targetCache
 end
+
 pcall(function()
     Players.PlayerAdded:Connect(invalidateTargets)
     Players.PlayerRemoving:Connect(invalidateTargets)
@@ -519,6 +620,8 @@ pcall(function()
         end
     end)
 end)
+
+-- nearest selected target to the cursor
 local function closestSelected(cx, cy)
     local best, bestDist = nil, 9e9
     for _, t in ipairs(collectTargets()) do
@@ -536,6 +639,7 @@ local function closestSelected(cx, cy)
     end
     return best
 end
+
 local function findClosest(cx, cy, localPos, ignoreSel)
     local best, bestDist = nil, 9e9
     local maxd = wepCap()
@@ -558,6 +662,7 @@ local function findClosest(cx, cy, localPos, ignoreSel)
     end
     return best, bestDist
 end
+
 local function validTarget(t)
     if not t or not t.character or not t.character.Parent then return false end
     if not rootOf(t) then return false end
@@ -567,7 +672,9 @@ local function validTarget(t)
     end)
     return not (okFf and ff)
 end
+
 local cubeLines = nil
+
 local function ensureDrawings()
     if cubeLines then return end
     cubeLines = {}
@@ -579,6 +686,7 @@ local function ensureDrawings()
         cubeLines[i] = l
     end
 end
+
 local function drawCube(verts2d)
     ensureDrawings()
     for i = 1, 12 do
@@ -588,6 +696,7 @@ local function drawCube(verts2d)
         cubeLines[i].Visible = true
     end
 end
+
 local function hideCube()
     if cubeLines then
         for i = 1, 12 do
@@ -595,11 +704,14 @@ local function hideCube()
         end
     end
 end
+
+-- walk the ray past glass/nc parts, give up after 8 hops
 local function wallBetween(pos, targetChar)
     local lp = localPlayer()
     local lpChar = lp and lp.Character
     local cam = Workspace.CurrentCamera
     local origin = (cam and cam.Position) or localRootPos()
+
     for _ = 1, 8 do
         local dir = pos - origin
         if dir.Magnitude < 0.05 then return false end
@@ -618,6 +730,7 @@ local function wallBetween(pos, targetChar)
     end
     return false
 end
+
 local function fireGun(now)
     local hold = randRange(cfg("tb_hold_min"), cfg("tb_hold_max")) / 1000
     if hold > 0.002 and pcall(mouse1press) then
@@ -626,25 +739,33 @@ local function fireGun(now)
     end
     pcall(mouse1click)
 end
+
 local lastErr = nil
+
 local function step()
     local now = tick()
+    tbEngaged = false
+
     if pendingRelease > 0 and now >= pendingRelease then
         pcall(mouse1release)
         pendingRelease = 0
     end
+
     if not cfg("tb_enabled") or not windowActive() then
         resetLock()
         hideCube()
         return
     end
+
     local cx, cy = cursorPos()
+
     pruneSel()
     do
         local cam = Workspace.CurrentCamera
         local lens = lensInfo()
         if cam and lens then updateSelVis(cam, lens) end
     end
+
     local localPos = localRootPos()
     local closest0 = findClosest(cx, cy, localPos, true)
     local selH = CFG.tb_selkey ~= 0 and vkHeld(CFG.tb_selkey)
@@ -657,16 +778,20 @@ local function step()
         if st then remSel(st) end
     end
     prevSelKey, prevUnselKey = selH, unselH
+
     if knifeOut() then
         return
     end
+
     if not keyActive() then
         resetLock()
         hideCube()
         return
     end
+
     local target = LOCKED
     local closest, closestDist = findClosest(cx, cy, localPos)
+
     if not LOCKED then
         target = closest
     elseif closest and closest.character ~= LOCKED.character then
@@ -682,15 +807,19 @@ local function step()
             target = closest
         end
     end
+
     if not validTarget(target) or not selOk(target) then
         resetLock()
         hideCube()
         return
     end
+
     LOCKED = target
     _G.StellarTriggerbot.LockedTarget = target.character
+
     local hrp = rootOf(target)
     local pos = hrp.Position
+
     local maxd = wepCap()
     if (pos.X == 0 and pos.Y == 0 and pos.Z == 0) or pos == localPos
         or (maxd > 0 and dist3(localPos, pos) > maxd) then
@@ -698,6 +827,7 @@ local function step()
         hideCube()
         return
     end
+
     if TRACK_CHAR ~= target.character then
         TRACK_CHAR = target.character
         TRACKED_VEL = Vector3.new(0, 0, 0)
@@ -712,9 +842,12 @@ local function step()
     end
     TRACK_POS = pos
     TRACK_T = now
+
     if cfg("tb_pred") then
         local vel = TRACKED_VEL
+
         local px, py = cfg("tb_pred_x"), cfg("tb_pred_y")
+
         if cfg("tb_dist_pred") then
             local d = dist3(localPos, pos)
             if d <= cfg("tb_close_dist") then
@@ -725,20 +858,26 @@ local function step()
                 px, py = cfg("tb_far_x"), cfg("tb_far_y")
             end
         end
+
         pos = pos + vel * Vector3.new(px, py, px)
     end
+
     _G.StellarTriggerbot.TargetPosition = pos
+
     local sp, onScreen = WorldToScreen(pos)
     if not onScreen then
         resetEngagement()
         hideCube()
         return
     end
+
     local hx, hy = cfg("tb_hitbox_x"), cfg("tb_hitbox_y")
     local inside = false
+
     if cfg("tb_visualize") then
         local size = Vector3.new(hx, hy, hx)
         local corners = getCorners(pos, size)
+
         local verts2d = {}
         local pts = {}
         local allOnScreen = true
@@ -751,11 +890,13 @@ local function step()
                 allOnScreen = false
             end
         end
+
         if allOnScreen then
             drawCube(verts2d)
         else
             hideCube()
         end
+
         if #pts >= 3 then
             local hull = convexHull(pts)
             inside = pointInPolygon(hull, cx, cy)
@@ -763,6 +904,7 @@ local function step()
         end
     else
         hideCube()
+
         local cursorD = dist2(sp.X, sp.Y, cx, cy)
         local test = true
         local lens = lensInfo()
@@ -774,6 +916,7 @@ local function step()
             test = cursorD
                 <= math.sqrt(hx * hx + hy * hy + hx * hx) * pxPerStud + 16
         end
+
         if test then
             local spx = WorldToScreen(pos + Vector3.new(hx, 0, 0))
             local spz = WorldToScreen(pos + Vector3.new(0, 0, hx))
@@ -784,14 +927,18 @@ local function step()
                 and math.abs(cy - sp.Y) <= hh + 12
         end
     end
+
     if inside then
         stickyUntil = now + 0.12
     elseif now < stickyUntil then
         inside = true
     end
+
     if inside then
+        tbEngaged = true
         local fire = true
         local humOn = cfg("tb_humanize")
+
         if now >= wallCheckAt then
             wallCheckAt = now + 0.05
             wallBlocked = wallBetween(pos, target.character)
@@ -799,6 +946,7 @@ local function step()
         if wallBlocked then
             fire = false
         end
+
         if fire and humOn then
             if not insideSince then
                 insideSince = now
@@ -812,6 +960,7 @@ local function step()
                 fire = false
             end
         end
+
         if fire then
             if humOn then
                 fireGun(now)
@@ -825,11 +974,255 @@ local function step()
                 pcall(mouse1click)
             end
             lastClick = now
+            lastFireAt = now
         end
     else
         resetEngagement()
     end
 end
+
+-- =====================================================================
+-- gun macro: cycles the ticked guns so the draw animation is skipped and
+-- the fire cooldown resets, which reads as a much faster shot rate
+-- =====================================================================
+local GM_GUNS = {
+    { cfgid = "gm_rev", slotid = "gm_rev_slot", test = function(low)
+        return low:find("revolver", 1, true) ~= nil
+    end },
+    { cfgid = "gm_db", slotid = "gm_db_slot", test = function(low)
+        return low:find("double", 1, true) ~= nil and low:find("barrel", 1, true) ~= nil
+    end },
+    { cfgid = "gm_tac", slotid = "gm_tac_slot", test = function(low)
+        return low == "tac"
+            or (low:find("tac", 1, true) ~= nil and low:find("shotgun", 1, true) ~= nil)
+    end },
+}
+
+local gmPrev, gmOn = false, false
+local gmNext, gmErr = 0, nil
+local gmHeldVk, gmIdx = nil, 0
+
+local function gmActive()
+    if not cfg("gm_on") then return false end
+    if cfg("gm_link") then
+        -- linked: only while the trigger has a target under the crosshair.
+        -- a linger above 0 keeps the spam alive briefly after it disengages.
+        if tbEngaged then return true end
+        local linger = (tonumber(cfg("gm_link_ms")) or 0) / 1000
+        return linger > 0 and (tick() - lastFireAt) <= linger
+    end
+    local mode = cfg("gm_mode")
+    if mode == "always" then return true end
+    local key = cfg("gm_key")
+    local pressed = key ~= nil and vkHeld(key)
+    if mode == "toggle" then
+        if pressed and not gmPrev then gmOn = not gmOn end
+        gmPrev = pressed
+        return gmOn
+    end
+    return pressed
+end
+
+local function gmWanted(name)
+    local low = tostring(name or ""):lower()
+    for _, g in ipairs(GM_GUNS) do
+        if cfg(g.cfgid) and g.test(low) then return true end
+    end
+    return false
+end
+
+-- backpack plus equipped, so a gun counts wherever it sits
+local function gmPool()
+    local lp = localPlayer()
+    if not lp then return {}, nil end
+    local char = lp.Character
+    local out = {}
+    local function scan(box)
+        if not box then return end
+        pcall(function()
+            for _, d in ipairs(box:GetChildren()) do
+                -- IsA lies on this executor, compare ClassName directly
+                if d.ClassName == "Tool" and gmWanted(d.Name) then
+                    out[#out + 1] = d
+                end
+            end
+        end)
+    end
+    scan(char)
+    pcall(function() scan(lp:FindFirstChildOfClass("Backpack")) end)
+    local hum
+    pcall(function()
+        if char then hum = char:FindFirstChildOfClass("Humanoid") end
+    end)
+    return out, hum
+end
+
+-- ammo: a gun reading as empty drops out of the cycle so the guns with
+-- ammo keep swapping. a gun with no readable ammo stays in, so an unknown
+-- source never blocks anything.
+local GM_AMMO_ATTRS = { "Ammo", "ammo", "AmmoCount", "AmmoLeft", "AmmoValue", "Clip", "ClipAmmo", "CurrentAmmo", "Mag", "Magazine", "Bullets", "Shots" }
+local GM_AMMO_KIDS = { ammo = true, ammocount = true, ammoleft = true, clip = true, clipammo = true, currentammo = true, mag = true, magazine = true, bullets = true, shots = true }
+local gmAmmoCache = {}
+
+local function gmNum(v)
+    if type(v) == "number" then return v end
+    if type(v) == "string" then
+        local n = v:match("%d+")
+        if n then return tonumber(n) end
+    end
+    return nil
+end
+
+local function gmReadAmmo(tool)
+    local ok, n = pcall(function()
+        for _, a in ipairs(GM_AMMO_ATTRS) do
+            local num = gmNum(tool:GetAttribute(a))
+            if num then return num end
+        end
+        return nil
+    end)
+    if ok and n ~= nil then return n end
+    local ok2, n2 = pcall(function()
+        for _, d in ipairs(tool:GetDescendants()) do
+            if GM_AMMO_KIDS[tostring(d.Name):lower()]
+                and tostring(d.ClassName):find("Value", 1, true) then
+                local num = gmNum(d.Value)
+                if num then return num end
+            end
+        end
+        return nil
+    end)
+    if ok2 then return n2 end
+    return nil
+end
+
+-- cached briefly, the cycle asks once per swap
+local function gmToolAmmo(tool)
+    local key = tostring(tool.Name)
+    local now = tick()
+    local hit = gmAmmoCache[key]
+    if hit and now - hit.t < 0.2 then return hit.n end
+    local n = gmReadAmmo(tool)
+    gmAmmoCache[key] = { t = now, n = n }
+    return n
+end
+
+local function gmToolEmpty(tool)
+    if not cfg("gm_ammo") then return false end
+    local n = gmToolAmmo(tool)
+    return n ~= nil and n <= 0
+end
+
+-- the gun's own tool, wherever it sits
+local function gmEmpty(g)
+    if not cfg("gm_ammo") then return false end
+    for _, t in ipairs(gmPool()) do
+        if g.test(tostring(t.Name):lower()) then return gmToolEmpty(t) end
+    end
+    return false
+end
+
+-- slots are the hotbar number keys the guns sit on
+local function gmSlots()
+    local out = {}
+    for _, g in ipairs(GM_GUNS) do
+        if cfg(g.cfgid) then
+            local slot = tonumber(cfg(g.slotid))
+            if slot and slot >= 1 and slot <= 9 and not gmEmpty(g) then
+                out[#out + 1] = slot
+            end
+        end
+    end
+    return out
+end
+
+-- let go of whatever key the last swap pressed
+local function gmRelease()
+    if gmHeldVk then
+        pcall(keyrelease, gmHeldVk)
+        gmHeldVk = nil
+    end
+end
+
+-- press the next ticked gun's hotbar key and hold it until the next swap
+local function gmStepKeys()
+    local slots = gmSlots()
+    if #slots == 0 then
+        gmRelease()
+        return
+    end
+    gmIdx = (gmIdx % #slots) + 1
+    local vk = 0x30 + slots[gmIdx]
+    gmRelease()
+    if pcall(keypress, vk) then gmHeldVk = vk end
+end
+
+-- direct equip, for games that let a script move the tool itself
+local function gmStepEquip()
+    local pool, hum = gmPool()
+    if not hum or #pool == 0 then return end
+    local held = heldToolName()
+    local tool, fallback
+    for _, t in ipairs(pool) do
+        if t.Name ~= held then
+            if not fallback then fallback = t end
+            if not gmToolEmpty(t) then
+                tool = t
+                break
+            end
+        end
+    end
+    if not tool then tool = fallback end
+    if not tool then return end
+    pcall(function()
+        if cfg("gm_drop") then hum:UnequipTools() end
+        hum:EquipTool(tool)
+    end)
+end
+
+local function gmStep()
+    if not gmActive() then
+        gmRelease()
+        return
+    end
+    local now = tick()
+    if now < gmNext then return end
+    local delay = (tonumber(cfg("gm_delay")) or 60) / 1000
+    gmNext = now + math.max(delay, 0.01)
+
+    if cfg("gm_method") == "equip" then
+        gmStepEquip()
+    else
+        gmStepKeys()
+    end
+end
+
+local function gmStepSafe()
+    local ok, err = pcall(gmStep)
+    if not ok and err ~= gmErr then
+        gmErr = err
+        warn("gun macro error: " .. tostring(err))
+    end
+end
+
+local gmHooked = false
+pcall(function()
+    local rs = game:GetService("RunService")
+    if rs and rs.Heartbeat then
+        rs.Heartbeat:Connect(gmStepSafe)
+        gmHooked = true
+    end
+end)
+
+if not gmHooked then
+    spawn(function()
+        while true do
+            gmStepSafe()
+            wait(0.01)
+        end
+    end)
+end
+
 local function safeStep()
     local ok, err = pcall(step)
     if not ok and err ~= lastErr then
@@ -837,6 +1230,7 @@ local function safeStep()
         warn("triggerbot error: " .. tostring(err))
     end
 end
+
 local loopHooked = false
 pcall(function()
     local rs = game:GetService("RunService")
@@ -845,6 +1239,7 @@ pcall(function()
         loopHooked = true
     end
 end)
+
 if not loopHooked then -- fallback if Heartbeat isn't there
     spawn(function()
         while true do
@@ -853,13 +1248,17 @@ if not loopHooked then -- fallback if Heartbeat isn't there
         end
     end)
 end
+
 local CFG_DIR = "triggerbot"
+
 local function cfgPath(name)
     return CFG_DIR .. "/" .. name .. ".cfg"
 end
+
 local function saveConfig(name)
     local lines = {}
     for k, val in pairs(CFG) do
+        -- menu-only state (file slots, display names) stays out of the file
         if not k:match("^cfg") and not k:match("Name$") then
             lines[#lines + 1] = k .. "=" .. tostring(val)
         end
@@ -868,6 +1267,7 @@ local function saveConfig(name)
     pcall(makefolder, CFG_DIR)
     return pcall(writefile, cfgPath(name), table.concat(lines, "\n"))
 end
+
 local function loadConfig(name)
     local ok, raw = pcall(readfile, cfgPath(name))
     if not ok or type(raw) ~= "string" then return false end
@@ -881,18 +1281,25 @@ local function loadConfig(name)
                 CFG[k] = true
             elseif val == "false" then
                 CFG[k] = false
-            elseif k == "tb_kbmode" then
+            elseif k == "tb_kbmode" or k == "gm_mode" or k == "gm_method" then
+                -- string settings: numbers and booleans cannot carry them
                 CFG[k] = val
             end
         end
     end
     return true
 end
+
+-- ---------------------------------------------------------------
+-- autoload: remember the last config used and restore it on start
+-- ---------------------------------------------------------------
 local AUTO_FILE = CFG_DIR .. "/autoload.txt"
+
 local function setAutoName(name)
     pcall(makefolder, CFG_DIR)
     pcall(writefile, AUTO_FILE, tostring(name or ""))
 end
+
 local function getAutoName()
     local ok, raw = pcall(readfile, AUTO_FILE)
     if not ok or type(raw) ~= "string" then return nil end
@@ -900,7 +1307,9 @@ local function getAutoName()
     if #n == 0 then return nil end
     return n
 end
+
 if CFG.tb_autoload == nil then CFG.tb_autoload = true end
+
 local function autoloadOnStart()
     if CFG.tb_autoload == false then return end
     local name = getAutoName()
@@ -909,7 +1318,9 @@ local function autoloadOnStart()
         CFG.cfgName = name
     end
 end
+
 autoloadOnStart()
+
 local function scanConfigs()
     local out = {}
     local ok, files = pcall(listfiles, CFG_DIR)
@@ -922,8 +1333,25 @@ local function scanConfigs()
     table.sort(out)
     return out
 end
+
+-- =====================================================================
+-- menu -- ui-menu, inlined
+--
+-- A pasted script cannot see files next to the project copy of this file:
+-- readfile("ui-menu.lua") fails in the executor sandbox, so the menu
+-- library is carried here instead of loaded. This block mirrors
+-- ui-menu.lua; keep the two in sync when either one changes.
+--
+-- CFG doubles as the menu's value store, so every widget id is a setting
+-- id and no second copy of the state has to be kept in sync.
+--
+-- Rows: toggle, slider, key, cycle, text, button, file, note.
+-- =====================================================================
+
 local MenuLib = {}
 MenuLib.version = "1.0"
+
+-- Palette. Override any key with config.theme = { accent = ... }.
 MenuLib.theme = {
     win = Color3.fromRGB(10, 10, 12),
     winBorder = Color3.fromRGB(38, 38, 44),
@@ -949,8 +1377,13 @@ MenuLib.theme = {
     edge = Color3.fromRGB(48, 48, 56),
     handle = Color3.fromRGB(232, 232, 238),
 }
+
+-- SystemBold is the closest thing this VM has to a cheat-menu label face:
+-- narrow, flat, and legible at 10-11px. Override with config.font.
 local FONT = 11
 pcall(function() FONT = Drawing.Fonts.SystemBold end)
+
+-- Keycodes offered while rebinding, with their display names.
 local KEY_NAMES = {
     [0x08] = "Backspace", [0x09] = "Tab", [0x0D] = "Enter", [0x10] = "Shift",
     [0x11] = "Ctrl", [0x12] = "Alt", [0x14] = "CapsLock", [0x1B] = "Escape",
@@ -962,17 +1395,25 @@ local KEY_NAMES = {
 for c = 0x30, 0x39 do KEY_NAMES[c] = string.char(c) end
 for c = 0x41, 0x5A do KEY_NAMES[c] = string.char(c) end
 for i = 1, 12 do KEY_NAMES[0x70 + i - 1] = "F" .. i end
+-- Mouse buttons are bindable too: the VM reports those through their own
+-- predicates rather than iskeypressed.
 KEY_NAMES[0x01] = "LMB"
 KEY_NAMES[0x02] = "RMB"
 KEY_NAMES[0x04] = "MMB"
 KEY_NAMES[0x05] = "MB4"
 KEY_NAMES[0x06] = "MB5"
+
 local KEY_LIST = {}
 for code in pairs(KEY_NAMES) do KEY_LIST[#KEY_LIST + 1] = code end
+
+-- One predicate for anything bindable, mouse buttons included.
 local MOUSE_DOWN = {
     [0x01] = function() local ok, r = pcall(ismouse1pressed) return ok and r == true end,
     [0x02] = function() local ok, r = pcall(ismouse2pressed) return ok and r == true end,
 }
+-- Middle and side buttons only exist as predicates on some builds. Where the
+-- predicate is missing the entry is skipped, and keyHeld falls through to
+-- iskeypressed with the Windows VK code instead.
 local SIDE_BTN = {
     [0x04] = ismouse3pressed,
     [0x05] = ismouse4pressed,
@@ -983,6 +1424,8 @@ for code, fn in pairs(SIDE_BTN) do
         MOUSE_DOWN[code] = function() local ok, r = pcall(fn) return ok and r == true end
     end
 end
+-- Buttons this VM never reports through iskeypressed (mouse 4/5, media
+-- keys) still arrive as InputBegan keycodes, so mirror them from the events.
 local UIS_HELD = {}
 pcall(function()
     local uis = game:GetService("UserInputService")
@@ -999,6 +1442,7 @@ pcall(function()
         end)
     end
 end)
+
 local function keyHeld(code)
     local fn = MOUSE_DOWN[code]
     if fn then return fn() end
@@ -1006,6 +1450,8 @@ local function keyHeld(code)
     if ok and r == true then return true end
     return UIS_HELD[code] == true
 end
+
+-- Characters typed into a text or number field, by keycode.
 local CHAR_MAP = {
     [0x08] = "\b", [0x0D] = "\n", [0x1B] = "\x1b",
     [0x20] = " ", [0xBA] = "_", [0xBB] = "+",
@@ -1016,8 +1462,11 @@ for c = 0, 9 do
     CHAR_MAP[0x60 + c] = tostring(c)
 end
 for c = 0x41, 0x5A do CHAR_MAP[c] = string.char(c + 32) end
+
 local CHAR_LIST = {}
 for code in pairs(CHAR_MAP) do CHAR_LIST[#CHAR_LIST + 1] = code end
+
+-- Integer sliders round on the way in, so %d never sees a float.
 local function isIntFmt(fmt)
     return fmt == "%d" or fmt == "%dms" or fmt == "%d%%"
 end
@@ -1025,24 +1474,38 @@ local function fmtNum(fmt, v)
     if isIntFmt(fmt) then v = math.floor(v + 0.5) end
     return string.format(fmt, v)
 end
+
 MenuLib.keyNames = KEY_NAMES
 function MenuLib.keyName(code)
     if type(code) ~= "number" then return "-" end
     return KEY_NAMES[code] or ("0x" .. string.format("%02X", code))
 end
+
+-- =====================================================================
+-- MenuLib.new(config) -> menu
+--
+-- config: title, x, y, w, h, sidebar, key, keyName, open, tab, values,
+--         theme, pool, sections, tabs, cards
+-- tabs:  tab index -> card ids; ids alternate columns, { id, col } pins one
+-- cards: card id -> { title, toggle?, rows }
+-- A card's `toggle` id draws a switch in its header and controls the card.
+-- =====================================================================
 function MenuLib.new(config)
     config = config or {}
+
     local T = {}
     for k, v in pairs(MenuLib.theme) do T[k] = v end
     if config.theme then
         for k, v in pairs(config.theme) do T[k] = v end
     end
+
     local values = config.values or {}
     local cards = config.cards or {}
     local tabs = config.tabs or {}
     local sections = config.sections or {}
     local title = config.title or "MENU"
     local listeners = {}
+
     local TOPBAR = 26   -- title strip; dragging it moves the window
     local TABBAR = 26   -- primary tab row
     local SUBBAR = 22   -- secondary tab row
@@ -1050,6 +1513,7 @@ function MenuLib.new(config)
     local PADX = 10
     local CARD_HDR = 16
     local ROW_H = 20
+
     local M = {
         open = config.open ~= false,
         x = config.x or 80,
@@ -1057,10 +1521,12 @@ function MenuLib.new(config)
         w = config.w or 560,
         h = config.h or 240,
     }
+
     if values.menuKey == nil then values.menuKey = config.key or 0x4B end
     if values.menuKeyName == nil then
         values.menuKeyName = config.keyName or MenuLib.keyName(values.menuKey)
     end
+
     local CUR_TAB = config.tab or 1
     local HITS = {}
     local dirty = true
@@ -1068,19 +1534,27 @@ function MenuLib.new(config)
     local editing = nil     -- { id, buf, numeric, min, max, fmt, prev }
     local confirmBox = nil  -- { text, onYes }
     local destroyed = false
+
     local dragging, dragOffX, dragOffY = false, 0, 0
     local sliderHit = nil
     local prevClick, prevKey = false, false
     local armDown = {}
+
+    -- ---------------------------------------------------------------
+    -- Drawing pools. Two square pools (rounded for panels/pills, plain
+    -- for hairlines) plus a text pool. Created once, hidden when unused.
+    -- ---------------------------------------------------------------
     local poolCfg = config.pool or {}
     local SQ_ROUND, SQ_PLAIN, TX_POOL = {}, {}, {}
     local sqN, spN, txtN = 0, 0, 0
+
     for i = 1, (poolCfg.round or 140) do
         local s = Drawing.new("Square")
         s.Color = T.text
         s.Filled = true
         s.Thickness = 1
         s.ZIndex = 10
+        -- never write Transparency on a Square: any write makes it disappear in this VM
         s.Visible = false
         pcall(function() s.Rounding = 4 end)
         SQ_ROUND[i] = s
@@ -1104,6 +1578,7 @@ function MenuLib.new(config)
         pcall(function() t.Font = FONT end)
         TX_POOL[i] = t
     end
+
     local function rq(x, y, w, h, color, z)
         sqN = sqN + 1
         local s = SQ_ROUND[sqN]
@@ -1115,6 +1590,7 @@ function MenuLib.new(config)
         s.Visible = true
         return s
     end
+
     local function pq(x, y, w, h, color, z)
         spN = spN + 1
         local s = SQ_PLAIN[spN]
@@ -1126,12 +1602,14 @@ function MenuLib.new(config)
         s.Visible = true
         return s
     end
+
     local function stroke(x, y, w, h, color, z)
         pq(x, y, w, 1, color, z)
         pq(x, y + h - 1, w, 1, color, z)
         pq(x, y + 1, 1, h - 2, color, z)
         pq(x + w - 1, y + 1, 1, h - 2, color, z)
     end
+
     local function tx(x, y, text, size, color, center, z)
         txtN = txtN + 1
         local t = TX_POOL[txtN]
@@ -1145,18 +1623,28 @@ function MenuLib.new(config)
         t.Visible = true
         return t
     end
+
+    -- ---------------------------------------------------------------
+    -- State changes go through here so menu.on() callbacks fire.
+    -- ---------------------------------------------------------------
     local function fireChanged(id, value)
         local fn = listeners[id]
         if fn then pcall(fn, value, id) end
         local any = listeners["*"]
         if any then pcall(any, value, id) end
     end
+
     local function setValue(id, value)
         values[id] = value
         dirty = true
         fireChanged(id, value)
     end
+
     local api
+
+    -- ---------------------------------------------------------------
+    -- Drawing
+    -- ---------------------------------------------------------------
     local function rowHeight(row)
         local k = row.kind
         if k == "cycle" or k == "text" then return 30 end
@@ -1164,6 +1652,7 @@ function MenuLib.new(config)
         if k == "note" then return 16 end
         return 20
     end
+
     local function cardHeight(card)
         local h = 8 + CARD_HDR + 6
         for _, row in ipairs(card.rows or {}) do
@@ -1171,25 +1660,32 @@ function MenuLib.new(config)
         end
         return h
     end
+
+    -- Text width is not known to us, so titles are measured crudely; close
+    -- enough to size the notch that interrupts the box's top border.
     local function approxW(s, size)
         return #s * (size * 0.52) + 6
     end
+
     local function drawCard(id, x, y, w)
         local card = cards[id]
         if not card then return 0 end
         local rows = card.rows or {}
         local h = cardHeight(card)
         local by0 = y + 8
+
         pq(x, by0, w, h - 8, T.card, 10)
         stroke(x, by0, w, h - 8, T.cardBorder, 10)
         pq(x + 1, by0 + 1, w - 2, 1, T.edge, 10)
         if card.toggle and values[card.toggle] == true then
             pq(x, by0 + 1, 2, h - 10, T.accent, 11)
         end
+
         local label = card.title or id
         local lw = approxW(label, 10)
         tx(x + 14, by0 - 5, label, 10, T.mute, false, 12)
         pq(x + 12, by0, lw + 6, 2, T.win, 11)
+
         if card.toggle then
             local on = values[card.toggle] == true
             local pw, ph = 18, 9
@@ -1198,6 +1694,7 @@ function MenuLib.new(config)
             rq(on and (px + pw - ph + 1) or (px + 1), py + 1, ph - 2, ph - 2, T.knob, 13)
             HITS[#HITS + 1] = { x = px - 4, y = py - 4, w = pw + 8, h = ph + 8, kind = "toggle", id = card.toggle }
         end
+
         local ix = x + 10
         local iw = w - 20
         local ry = by0 + CARD_HDR
@@ -1223,6 +1720,7 @@ function MenuLib.new(config)
                 rq(ix + iw * f - 3, ry + 12, 6, 8, T.handle, 13)
                 HITS[#HITS + 1] = { x = ix - 4, y = ry + 8, w = iw + 8, h = 14, kind = "slider", id = row.id,
                     min = lo, max = hi, fmt = fmt, tx = ix, tw = iw }
+                -- appended last so the value box wins over the bar it sits on
                 HITS[#HITS + 1] = { x = x + w - 64, y = ry - 3, w = 54, h = 18, kind = "numedit",
                     id = row.id, min = lo, max = hi, fmt = fmt }
             elseif row.kind == "key" then
@@ -1286,13 +1784,25 @@ function MenuLib.new(config)
         end
         return h
     end
+
+    -- a tab entry is a card id (columns alternate) or { id = ..., col = n }
+    local function tabId(entry)
+        if type(entry) == "table" then return entry.id end
+        return entry
+    end
+
+    local function tabCol(entry, i)
+        if type(entry) == "table" then return entry.col or 1 end
+        return ((i - 1) % 2) + 1
+    end
+
     local function requiredHeight()
         local contentH = { 0, 0 }
         local list = tabs[CUR_TAB] or {}
         for i = 1, #list do
-            local card = cards[list[i]]
+            local card = cards[tabId(list[i])]
             if card then
-                local col = ((i - 1) % 2) + 1
+                local col = tabCol(list[i], i)
                 if contentH[col] > 0 then contentH[col] = contentH[col] + 12 end
                 contentH[col] = contentH[col] + cardHeight(card)
             end
@@ -1301,24 +1811,33 @@ function MenuLib.new(config)
         if need < (config.h or 0) then need = config.h end
         return need
     end
+
     local function drawMenu()
         sqN, spN, txtN = 0, 0, 0
         HITS = {}
         if not M.open then return end
+
         M.h = requiredHeight()
         local x, y, w, h = M.x, M.y, M.w, M.h
+
         rq(x, y, w, h, T.win, 8)
         stroke(x, y, w, h, T.winBorder, 8)
         pq(x + 6, y, w - 12, 2, T.accent, 10)
+
+        -- title strip, centred and dim like a window caption
         rq(x + 1, y + 1, w - 2, TOPBAR - 1, T.top, 9)
         pq(x, y + TOPBAR, w, 1, T.line, 9)
         tx(x + w / 2, y + 8, title, 10, T.mute, true, 11)
+
+        -- the primary tab that owns the active secondary tab
         local secIdx = 1
         for i = 1, #sections do
             for _, item in ipairs(sections[i].items or {}) do
                 if item.tab == CUR_TAB then secIdx = i end
             end
         end
+
+        -- primary tab row
         local pcount = math.max(1, #sections)
         local ptabY = y + TOPBAR + 1
         local pw = w / pcount
@@ -1332,6 +1851,8 @@ function MenuLib.new(config)
             HITS[#HITS + 1] = { x = sxi, y = ptabY, w = pw, h = TABBAR, kind = "ptab", section = i }
         end
         pq(x, ptabY + TABBAR, w, 1, T.line, 9)
+
+        -- secondary tab row
         local subY = ptabY + TABBAR + 1
         local subs = (sections[secIdx] or {}).items or {}
         local scount = math.max(1, #subs)
@@ -1347,16 +1868,25 @@ function MenuLib.new(config)
                 id = item and item.tab }
         end
         pq(x, subY + SUBBAR, w, 1, T.line, 9)
+
         local list = tabs[CUR_TAB] or {}
         local availW = w - PADX * 2
-        local colW = #list > 1 and (availW - PADX) / 2 or availW
+        local two = false
+        for i = 1, #list do
+            if tabCol(list[i], i) > 1 then
+                two = true
+                break
+            end
+        end
+        local colW = two and (availW - PADX) / 2 or availW
         local cy0 = subY + SUBBAR + PADX
         local colY = { cy0, cy0 }
         for i = 1, #list do
-            local col = (i - 1) % 2
-            local ch = drawCard(list[i], x + PADX + col * (colW + PADX), colY[col + 1], colW)
+            local col = tabCol(list[i], i) - 1
+            local ch = drawCard(tabId(list[i]), x + PADX + col * (colW + PADX), colY[col + 1], colW)
             colY[col + 1] = colY[col + 1] + ch + 12
         end
+
         if confirmBox then
             local bw, bh = 250, 76
             local bx = x + (w - bw) / 2
@@ -1374,15 +1904,18 @@ function MenuLib.new(config)
             HITS[#HITS + 1] = { x = yx, y = yy, w = yw, h = yh, kind = "confirmyes" }
             HITS[#HITS + 1] = { x = nx, y = yy, w = yw, h = yh, kind = "confirmno" }
         end
+
         for i = sqN + 1, #SQ_ROUND do SQ_ROUND[i].Visible = false end
         for i = spN + 1, #SQ_PLAIN do SQ_PLAIN[i].Visible = false end
         for i = txtN + 1, #TX_POOL do TX_POOL[i].Visible = false end
     end
+
     local function hideAll()
         for i = 1, #SQ_ROUND do SQ_ROUND[i].Visible = false end
         for i = 1, #SQ_PLAIN do SQ_PLAIN[i].Visible = false end
         for i = 1, #TX_POOL do TX_POOL[i].Visible = false end
     end
+
     local function setOpen(state)
         M.open = state and true or false
         dirty = true
@@ -1393,11 +1926,16 @@ function MenuLib.new(config)
             hideAll()
         end
     end
+
+    -- ---------------------------------------------------------------
+    -- Input
+    -- ---------------------------------------------------------------
     local function mousePos()
         local ok, m = pcall(function() return game:GetService("Players").LocalPlayer:GetMouse() end)
         if ok and m and m.X and m.Y then return m.X, m.Y end
         return -1, -1
     end
+
     local function applySlider(hit, mx)
         local f = (mx - hit.tx) / hit.tw
         if f < 0 then f = 0 elseif f > 1 then f = 1 end
@@ -1405,12 +1943,18 @@ function MenuLib.new(config)
         if isIntFmt(hit.fmt) then val = math.floor(val + 0.5) end
         setValue(hit.id, val)
     end
+
+    -- Later hits are drawn on top (the confirm modal over the cards), so the
+    -- topmost one wins a click.
     local function hitAt(mx, my)
         for i = #HITS, 1, -1 do
             local h = HITS[i]
             if mx >= h.x and mx <= h.x + h.w and my >= h.y and my <= h.y + h.h then return h end
         end
     end
+
+    -- Inline text / number editing: opened by a click, closed by Enter,
+    -- Escape, or a click anywhere else.
     local function commitEdit()
         if not editing then return end
         local e = editing
@@ -1429,6 +1973,7 @@ function MenuLib.new(config)
         end
         dirty = true
     end
+
     local function startEdit(hit)
         local cur = values[hit.id]
         editing = {
@@ -1440,6 +1985,7 @@ function MenuLib.new(config)
         }
         dirty = true
     end
+
     local function editTick()
         if not editing then return end
         for i = 1, #CHAR_LIST do
@@ -1474,10 +2020,13 @@ function MenuLib.new(config)
             editing.prev[code] = held
         end
     end
+
     local function openConfirm(text, onYes)
         confirmBox = { text = text, onYes = onYes }
         dirty = true
     end
+
+    -- Bind mode: remember which keys are already down, then take the first new one.
     local function startBind(id)
         listeningId = id
         armDown = {}
@@ -1487,7 +2036,11 @@ function MenuLib.new(config)
         end
         dirty = true
     end
+
     local function pollBind()
+        -- Keys already down when binding started (usually the LMB click that
+        -- opened it) are ignored until released once, so no key binds itself
+        -- from the opening click and mouse buttons can still be chosen.
         for i = 1, #KEY_LIST do
             local code = KEY_LIST[i]
             if armDown[code] and not keyHeld(code) then armDown[code] = nil end
@@ -1508,8 +2061,10 @@ function MenuLib.new(config)
         end
         return false
     end
+
     local function step()
         if destroyed then return end
+
         if listeningId then
             pollBind()
             local okC, c = pcall(ismouse1pressed)
@@ -1517,6 +2072,9 @@ function MenuLib.new(config)
             prevKey = true
             return
         end
+
+        -- While a field is being typed into the menu key must not toggle
+        -- the menu: backspace is an edit there, not a close.
         if editing then
             editTick()
             local okC, c = pcall(ismouse1pressed)
@@ -1530,17 +2088,22 @@ function MenuLib.new(config)
             end
             return
         end
+
         local keyDown = keyHeld(values.menuKey)
         if keyDown and not prevKey then setOpen(not M.open) end
         prevKey = keyDown
+
         local okC, c = pcall(ismouse1pressed)
         local down = okC and c == true
+
         if not M.open then
             prevClick = down
             dragging, sliderHit = false, nil
             return
         end
+
         local mx, my = mousePos()
+
         if down and not prevClick then
             if confirmBox then
                 local hit = hitAt(mx, my)
@@ -1601,15 +2164,18 @@ function MenuLib.new(config)
         elseif down and sliderHit then
             applySlider(sliderHit, mx)
         end
+
         if not down then
             dragging, sliderHit = false, nil
         end
         prevClick = down
+
         if dirty then
             drawMenu()
             dirty = false
         end
     end
+
     local function destroy()
         if destroyed then return end
         destroyed = true
@@ -1619,27 +2185,34 @@ function MenuLib.new(config)
         for i = 1, #TX_POOL do pcall(function() TX_POOL[i]:Remove() end) end
         HITS = {}
     end
+
     api = {
         values = values,
         config = config,
         theme = T,
+
         step = step,
         draw = drawMenu,
         redraw = function() dirty = true end,
+
         setOpen = setOpen,
         isOpen = function() return M.open end,
         toggle = function() setOpen(not M.open) end,
+
         set = setValue,
         get = function(id) return values[id] end,
         on = function(id, fn) listeners[id] = fn end,
+
         confirm = openConfirm,
         edit = startEdit,
         isEditing = function() return editing ~= nil end,
+
         tab = function(index)
             CUR_TAB = index
             dirty = true
         end,
         currentTab = function() return CUR_TAB end,
+
         position = function(x, y)
             M.x, M.y = x, y
             dirty = true
@@ -1651,18 +2224,22 @@ function MenuLib.new(config)
         end,
         bounds = function() return M.x, M.y, M.w, M.h end,
         hits = function() return HITS end,
+
         destroy = destroy,
         pools = { round = SQ_ROUND, plain = SQ_PLAIN, text = TX_POOL },
     }
+
     return api
 end
 CFG.cfgName = CFG.cfgName or "config1"
 if CFG.menuKey == nil then CFG.menuKey = 0x08 end
+
 local FILE_SLOTS = 8
 local fileRows = {}
 for i = 1, FILE_SLOTS do
     fileRows[i] = { kind = "file", id = "cfgFile" .. i, label = "" }
 end
+
 local menu
 if MenuLib then
 local okNew, m = pcall(MenuLib.new, {
@@ -1688,7 +2265,14 @@ local okNew, m = pcall(MenuLib.new, {
     },
     tabs = {
         [1] = { "main", "hitbox" },
-        [2] = { "weapons", "revolver", "double", "tac" },
+        [2] = {
+            { id = "weapons", col = 1 },
+            { id = "revolver", col = 1 },
+            { id = "double", col = 1 },
+            { id = "tac", col = 1 },
+            { id = "gmacro", col = 2 },
+            { id = "gmguns", col = 2 },
+        },
         [3] = { "sticky" },
         [4] = { "prediction", "bands" },
         [5] = { "humanize", "hesitation" },
@@ -1743,6 +2327,36 @@ local okNew, m = pcall(MenuLib.new, {
             toggle = "tb_tac_on",
             rows = {
                 { kind = "slider", id = "tb_tac_dist", label = "Range", min = 20, max = 1000, fmt = "%d" },
+            },
+        },
+        gmacro = {
+            title = "Gun macro",
+            toggle = "gm_on",
+            rows = {
+                { kind = "key", id = "gm_key", label = "Activation key" },
+                { kind = "cycle", id = "gm_mode", label = "Mode",
+                    options = { "hold", "toggle", "always" } },
+                { kind = "cycle", id = "gm_method", label = "Method",
+                    options = { "keys", "equip" } },
+                { kind = "slider", id = "gm_delay", label = "Swap delay", min = 10, max = 400, fmt = "%dms" },
+                { kind = "toggle", id = "gm_link", label = "Link to triggerbot" },
+                { kind = "slider", id = "gm_link_ms", label = "Linger", min = 0, max = 500, fmt = "%dms" },
+                { kind = "toggle", id = "gm_drop", label = "Unequip first" },
+                { kind = "note", label = "linked = only while it shoots someone" },
+            },
+        },
+        gmguns = {
+            title = "Macro guns",
+            rows = {
+                { kind = "toggle", id = "gm_rev", label = "Revolver" },
+                { kind = "slider", id = "gm_rev_slot", label = "Revolver slot", min = 1, max = 9, fmt = "%d" },
+                { kind = "toggle", id = "gm_db", label = "Double barrel" },
+                { kind = "slider", id = "gm_db_slot", label = "Double barrel slot", min = 1, max = 9, fmt = "%d" },
+                { kind = "toggle", id = "gm_tac", label = "Tac shotgun" },
+                { kind = "slider", id = "gm_tac_slot", label = "Tac shotgun slot", min = 1, max = 9, fmt = "%d" },
+                { kind = "toggle", id = "gm_ammo", label = "Skip empty guns" },
+                { kind = "note", label = "slot = the number key the gun is on" },
+                { kind = "note", label = "skip empty = 0 ammo drops out" },
             },
         },
         sticky = {
@@ -1819,6 +2433,7 @@ local okNew, m = pcall(MenuLib.new, {
     menu = okNew and m or nil
     if not menu then warn("[tb] menu init failed: " .. tostring(m)) end
 end
+
 local function refreshFiles()
     if not menu then return end
     local list = scanConfigs()
@@ -1826,9 +2441,11 @@ local function refreshFiles()
         menu.set("cfgFile" .. i, list[i])
     end
 end
+
 if menu then
     for i = 1, FILE_SLOTS do
         local rid = "cfgFile" .. i
+
         menu.on(rid .. ":load", function(name)
             if name and loadConfig(name) then
                 CFG.cfgName = name
@@ -1836,6 +2453,7 @@ if menu then
                 menu.redraw()
             end
         end)
+
         menu.on(rid .. ":save", function(name)
             if not name then return end
             menu.confirm("overwrite '" .. name .. "'?", function()
@@ -1844,6 +2462,7 @@ if menu then
                 refreshFiles()
             end)
         end)
+
         menu.on(rid .. ":del", function(name)
             if not name then return end
             menu.confirm("delete '" .. name .. "'?", function()
@@ -1854,6 +2473,7 @@ if menu then
             end)
         end)
     end
+
     menu.on("cfgCreate", function()
         local n = tostring(CFG.cfgName or ""):gsub("[^%w_%- ]", ""):gsub("^%s+", ""):gsub("%s+$", "")
         if #n == 0 then return end
@@ -1862,7 +2482,9 @@ if menu then
         setAutoName(n)
         refreshFiles()
     end)
+
     refreshFiles()
+
     local lastMenuErr = nil
     local function safeMenu()
         local ok, e = pcall(menu.step)
@@ -1871,6 +2493,7 @@ if menu then
             warn("[tb] menu: " .. tostring(e))
         end
     end
+
     local menuHooked = false
     pcall(function()
         local rs = game:GetService("RunService")
