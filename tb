@@ -1511,6 +1511,7 @@ function MenuLib.new(config)
     local SUBBAR = 22   -- secondary tab row
     local SIDEBAR = config.sidebar or 0
     local PADX = 10
+    local PADB = 26   -- breathing room under the last card
     local CARD_HDR = 16
     local ROW_H = 20
 
@@ -1559,7 +1560,7 @@ function MenuLib.new(config)
         pcall(function() s.Rounding = 4 end)
         SQ_ROUND[i] = s
     end
-    for i = 1, (poolCfg.plain or 90) do
+    for i = 1, (poolCfg.plain or 200) do
         local s = Drawing.new("Square")
         s.Color = T.text
         s.Filled = true
@@ -1568,7 +1569,7 @@ function MenuLib.new(config)
         s.Visible = false
         SQ_PLAIN[i] = s
     end
-    for i = 1, (poolCfg.text or 110) do
+    for i = 1, (poolCfg.text or 160) do
         local t = Drawing.new("Text")
         t.Size = 12
         t.Color = T.text
@@ -1582,7 +1583,15 @@ function MenuLib.new(config)
     local function rq(x, y, w, h, color, z)
         sqN = sqN + 1
         local s = SQ_ROUND[sqN]
-        if not s then return nil end
+        if not s then
+            s = Drawing.new("Square")
+            s.Color = T.text
+            s.Filled = true
+            s.Thickness = 1
+            s.Visible = false
+            pcall(function() s.Rounding = 4 end)
+            SQ_ROUND[sqN] = s
+        end
         s.Position = Vector2.new(x, y)
         s.Size = Vector2.new(w, h)
         s.Color = color
@@ -1594,7 +1603,14 @@ function MenuLib.new(config)
     local function pq(x, y, w, h, color, z)
         spN = spN + 1
         local s = SQ_PLAIN[spN]
-        if not s then return nil end
+        if not s then
+            s = Drawing.new("Square")
+            s.Color = T.text
+            s.Filled = true
+            s.Thickness = 1
+            s.Visible = false
+            SQ_PLAIN[spN] = s
+        end
         s.Position = Vector2.new(x, y)
         s.Size = Vector2.new(w, h)
         s.Color = color
@@ -1613,7 +1629,15 @@ function MenuLib.new(config)
     local function tx(x, y, text, size, color, center, z)
         txtN = txtN + 1
         local t = TX_POOL[txtN]
-        if not t then return nil end
+        if not t then
+            t = Drawing.new("Text")
+            t.Size = size or 12
+            t.Color = color or T.text
+            t.Outline = false
+            t.Visible = false
+            pcall(function() t.Font = FONT end)
+            TX_POOL[txtN] = t
+        end
         t.Position = Vector2.new(x, y)
         t.Size = size
         t.Color = color
@@ -1796,18 +1820,29 @@ function MenuLib.new(config)
         return ((i - 1) % 2) + 1
     end
 
-    local function requiredHeight()
-        local contentH = { 0, 0 }
+    -- Cards per side and their natural heights. Cards stack with one tight,
+    -- fixed gap and both columns stay top aligned.
+    local function tabMetrics()
         local list = tabs[CUR_TAB] or {}
+        local count, nat = { 0, 0 }, { 0, 0 }
+        local two = false
         for i = 1, #list do
+            local col = tabCol(list[i], i)
+            if col > 2 then col = 2 end
+            if col > 1 then two = true end
             local card = cards[tabId(list[i])]
             if card then
-                local col = tabCol(list[i], i)
-                if contentH[col] > 0 then contentH[col] = contentH[col] + 12 end
-                contentH[col] = contentH[col] + cardHeight(card)
+                count[col] = count[col] + 1
+                nat[col] = nat[col] + cardHeight(card)
             end
         end
-        local need = TOPBAR + TABBAR + SUBBAR + PADX * 2 + math.max(contentH[1], contentH[2])
+
+        return count, nat, 12, math.max(nat[1], nat[2]), two, { 0, 0 }
+    end
+
+    local function requiredHeight()
+        local _, _, _, contentH = tabMetrics()
+        local need = TOPBAR + TABBAR + SUBBAR + PADX + PADB + contentH
         if need < (config.h or 0) then need = config.h end
         return need
     end
@@ -1871,20 +1906,16 @@ function MenuLib.new(config)
 
         local list = tabs[CUR_TAB] or {}
         local availW = w - PADX * 2
-        local two = false
-        for i = 1, #list do
-            if tabCol(list[i], i) > 1 then
-                two = true
-                break
-            end
-        end
+        local _, _, gap, _, two, off = tabMetrics()
         local colW = two and (availW - PADX) / 2 or availW
         local cy0 = subY + SUBBAR + PADX
-        local colY = { cy0, cy0 }
+        local colY = { cy0 + off[1], cy0 + off[2] }
         for i = 1, #list do
-            local col = tabCol(list[i], i) - 1
+            local col = tabCol(list[i], i)
+            if col > 2 then col = 2 end
+            col = col - 1
             local ch = drawCard(tabId(list[i]), x + PADX + col * (colW + PADX), colY[col + 1], colW)
-            colY[col + 1] = colY[col + 1] + ch + 12
+            colY[col + 1] = colY[col + 1] + ch + gap
         end
 
         if confirmBox then
@@ -2287,7 +2318,6 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "cycle", id = "tb_kbmode", label = "Mode",
                     options = { "hold", "toggle", "always" } },
                 { kind = "toggle", id = "tb_knock", label = "Knock check" },
-                { kind = "note", label = "never aims at knocked players" },
             },
         },
         hitbox = {
@@ -2297,34 +2327,31 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "slider", id = "tb_maxdist", label = "Max dist", min = 0, max = 2000, fmt = "%d" },
                 { kind = "slider", id = "tb_hitbox_x", label = "Hitbox X", min = 0.1, max = 5.0, fmt = "%.1f" },
                 { kind = "slider", id = "tb_hitbox_y", label = "Hitbox Y", min = 0.5, max = 8.0, fmt = "%.1f" },
-                { kind = "note", label = "max dist 0 = no limit" },
             },
         },
         weapons = {
             title = "Weapon checks",
             toggle = "tb_wepcheck",
             rows = {
-                { kind = "note", label = "caps range by the held gun" },
-                { kind = "note", label = "unlisted guns use max dist" },
+                { kind = "toggle", id = "tb_rev_on", label = "Revolver" },
+                { kind = "toggle", id = "tb_db_on", label = "Double barrel" },
+                { kind = "toggle", id = "tb_tac_on", label = "Tac shotgun" },
             },
         },
         revolver = {
             title = "Revolver",
-            toggle = "tb_rev_on",
             rows = {
                 { kind = "slider", id = "tb_rev_dist", label = "Range", min = 20, max = 1000, fmt = "%d" },
             },
         },
         double = {
             title = "Double barrel",
-            toggle = "tb_db_on",
             rows = {
                 { kind = "slider", id = "tb_db_dist", label = "Range", min = 20, max = 1000, fmt = "%d" },
             },
         },
         tac = {
             title = "Tac shotgun",
-            toggle = "tb_tac_on",
             rows = {
                 { kind = "slider", id = "tb_tac_dist", label = "Range", min = 20, max = 1000, fmt = "%d" },
             },
@@ -2341,33 +2368,26 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "slider", id = "gm_delay", label = "Swap delay", min = 10, max = 400, fmt = "%dms" },
                 { kind = "toggle", id = "gm_link", label = "Link to triggerbot" },
                 { kind = "slider", id = "gm_link_ms", label = "Linger", min = 0, max = 500, fmt = "%dms" },
-                { kind = "toggle", id = "gm_drop", label = "Unequip first" },
-                { kind = "note", label = "linked = only while it shoots someone" },
             },
         },
         gmguns = {
             title = "Macro guns",
             rows = {
                 { kind = "toggle", id = "gm_rev", label = "Revolver" },
-                { kind = "slider", id = "gm_rev_slot", label = "Revolver slot", min = 1, max = 9, fmt = "%d" },
                 { kind = "toggle", id = "gm_db", label = "Double barrel" },
-                { kind = "slider", id = "gm_db_slot", label = "Double barrel slot", min = 1, max = 9, fmt = "%d" },
                 { kind = "toggle", id = "gm_tac", label = "Tac shotgun" },
+                { kind = "slider", id = "gm_rev_slot", label = "Revolver slot", min = 1, max = 9, fmt = "%d" },
+                { kind = "slider", id = "gm_db_slot", label = "Double barrel slot", min = 1, max = 9, fmt = "%d" },
                 { kind = "slider", id = "gm_tac_slot", label = "Tac shotgun slot", min = 1, max = 9, fmt = "%d" },
-                { kind = "toggle", id = "gm_ammo", label = "Skip empty guns" },
-                { kind = "note", label = "slot = the number key the gun is on" },
-                { kind = "note", label = "skip empty = 0 ammo drops out" },
             },
         },
         sticky = {
             title = "Sticky aim",
             toggle = "tb_sticky",
             rows = {
-                { kind = "note", label = "only selected targets get shot" },
                 { kind = "key", id = "tb_selkey", label = "Select key" },
                 { kind = "key", id = "tb_unselkey", label = "Unselect key" },
                 { kind = "toggle", id = "tb_selvis", label = "Target visuals" },
-                { kind = "note", label = "red box plus TARGET label" },
             },
         },
         prediction = {
@@ -2421,7 +2441,6 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "button", action = "cfgCreate", label = "save config" },
                 { kind = "toggle", id = "tb_autoload", label = "Auto load config" },
                 { kind = "key", id = "menuKey", label = "Menu key" },
-                { kind = "note", label = "restores the last loaded config" },
             },
         },
         saved = {
