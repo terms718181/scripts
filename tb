@@ -1000,7 +1000,8 @@ local GM_GUNS = {
 
 local gmPrev, gmOn = false, false
 local gmNext, gmErr = 0, nil
-local gmHeldVk, gmIdx = nil, 0
+local gmHeldVk, gmIdx, gmCheckAt = nil, 0, 0
+local gmPin = nil
 
 local function gmActive()
     if not cfg("gm_on") then return false end
@@ -1023,37 +1024,52 @@ local function gmActive()
     return pressed
 end
 
-local function gmWanted(name)
-    local low = tostring(name or ""):lower()
+-- which guns are ticked, resolved once per pass. the old version asked cfg()
+-- for every gun for every child of every box, which ran to dozens of snapshot
+-- lookups per swap; the ticked set does not change inside one swap
+local function gmEnabled()
+    local out = {}
     for _, g in ipairs(GM_GUNS) do
-        if cfg(g.cfgid) and g.test(low) then return true end
+        if cfg(g.cfgid) then out[#out + 1] = g end
+    end
+    return out
+end
+
+local function gmWanted(name, guns)
+    local low = tostring(name or ""):lower()
+    for _, g in ipairs(guns) do
+        if g.test(low) then return true end
     end
     return false
+end
+
+-- one walk per swap, shared by every gun, instead of one walk per gun
+local function gmCollect(box, out, guns)
+    if not box then return end
+    pcall(function()
+        for _, d in ipairs(box:GetChildren()) do
+            -- IsA lies on this executor, compare ClassName directly
+            if d.ClassName == "Tool" and gmWanted(d.Name, guns) then
+                out[#out + 1] = d
+            end
+        end
+    end)
 end
 
 -- backpack plus equipped, so a gun counts wherever it sits
 local function gmPool()
     local lp = localPlayer()
-    if not lp then return {}, nil end
-    local char = lp.Character
+    local char = lp and lp.Character
+    if not char then return {}, nil end
+    local guns = gmEnabled()
     local out = {}
-    local function scan(box)
-        if not box then return end
-        pcall(function()
-            for _, d in ipairs(box:GetChildren()) do
-                -- IsA lies on this executor, compare ClassName directly
-                if d.ClassName == "Tool" and gmWanted(d.Name) then
-                    out[#out + 1] = d
-                end
-            end
-        end)
+    if #guns > 0 then
+        gmCollect(char, out, guns)
+        local ok, pack = pcall(function() return lp:FindFirstChildOfClass("Backpack") end)
+        if ok then gmCollect(pack, out, guns) end
     end
-    scan(char)
-    pcall(function() scan(lp:FindFirstChildOfClass("Backpack")) end)
     local hum
-    pcall(function()
-        if char then hum = char:FindFirstChildOfClass("Humanoid") end
-    end)
+    pcall(function() hum = char:FindFirstChildOfClass("Humanoid") end)
     return out, hum
 end
 
@@ -1073,26 +1089,52 @@ local function gmNum(v)
     return nil
 end
 
-local function gmReadAmmo(tool)
-    local ok, n = pcall(function()
-        for _, a in ipairs(GM_AMMO_ATTRS) do
-            local num = gmNum(tool:GetAttribute(a))
-            if num then return num end
+-- the source that answered last time is remembered per tool, so a repeat ask
+-- is one property read instead of a GetDescendants walk over the whole tool.
+-- a tool with nothing readable is parked for 2s, so the walking path costs at
+-- most one walk per tool per 2s instead of one per cache tick
+local gmAmmoRef = setmetatable({}, { __mode = "k" })
+
+local function gmReadAmmo(tool, now)
+    local ref = gmAmmoRef[tool]
+    if ref then
+        if ref.none then
+            if now - ref.none < 2 then return nil end
+        else
+            local ok, raw
+            if ref.attr then
+                ok, raw = pcall(function() return tool:GetAttribute(ref.attr) end)
+            else
+                ok, raw = pcall(function() return ref.obj.Value end)
+            end
+            local n = ok and gmNum(raw) or nil
+            if n then return n end
         end
-        return nil
-    end)
-    if ok and n ~= nil then return n end
-    local ok2, n2 = pcall(function()
+        gmAmmoRef[tool] = nil
+    end
+    for _, a in ipairs(GM_AMMO_ATTRS) do
+        local ok, raw = pcall(function() return tool:GetAttribute(a) end)
+        local n = ok and gmNum(raw) or nil
+        if n then
+            gmAmmoRef[tool] = { attr = a }
+            return n
+        end
+    end
+    local ok2, n2, obj = pcall(function()
         for _, d in ipairs(tool:GetDescendants()) do
             if GM_AMMO_KIDS[tostring(d.Name):lower()]
                 and tostring(d.ClassName):find("Value", 1, true) then
                 local num = gmNum(d.Value)
-                if num then return num end
+                if num then return num, d end
             end
         end
         return nil
     end)
-    if ok2 then return n2 end
+    if ok2 and n2 ~= nil then
+        gmAmmoRef[tool] = obj and { obj = obj } or nil
+        return n2
+    end
+    gmAmmoRef[tool] = { none = now }
     return nil
 end
 
@@ -1102,7 +1144,7 @@ local function gmToolAmmo(tool)
     local now = tick()
     local hit = gmAmmoCache[key]
     if hit and now - hit.t < 0.2 then return hit.n end
-    local n = gmReadAmmo(tool)
+    local n = gmReadAmmo(tool, now)
     gmAmmoCache[key] = { t = now, n = n }
     return n
 end
@@ -1113,23 +1155,25 @@ local function gmToolEmpty(tool)
     return n ~= nil and n <= 0
 end
 
--- the gun's own tool, wherever it sits
-local function gmEmpty(g)
-    if not cfg("gm_ammo") then return false end
-    for _, t in ipairs(gmPool()) do
+-- the gun's own tool, wherever it sits. the pool comes in as an argument:
+-- a fresh scan per gun per swap was the most expensive thing in this loop
+local function gmGunEmpty(g, pool, ammoOn)
+    if not ammoOn then return false end
+    for _, t in ipairs(pool) do
         if g.test(tostring(t.Name):lower()) then return gmToolEmpty(t) end
     end
     return false
 end
 
--- slots are the hotbar number keys the guns sit on
-local function gmSlots()
+-- slots are the hotbar number keys the guns sit on. each entry keeps its gun
+-- so the hand can be compared against that exact gun, not just "some ticked gun"
+local function gmSlots(pool, ammoOn)
     local out = {}
     for _, g in ipairs(GM_GUNS) do
         if cfg(g.cfgid) then
             local slot = tonumber(cfg(g.slotid))
-            if slot and slot >= 1 and slot <= 9 and not gmEmpty(g) then
-                out[#out + 1] = slot
+            if slot and slot >= 1 and slot <= 9 and not gmGunEmpty(g, pool, ammoOn) then
+                out[#out + 1] = { slot = slot, gun = g }
             end
         end
     end
@@ -1144,15 +1188,60 @@ local function gmRelease()
     end
 end
 
+-- is this exact gun the tool in hand right now? a dry ticked gun left in hand
+-- must not count as "a ticked gun is out", or the last gun with ammo never
+-- gets pulled while the empty one sits there
+local function gmOnGun(g)
+    local held = heldToolName()
+    if not held then return false end
+    local low = tostring(held):lower()
+    if g then return g.test(low) end
+    for _, x in ipairs(gmEnabled()) do
+        if x.test(low) then return true end
+    end
+    return false
+end
+
 -- press the next ticked gun's hotbar key and hold it until the next swap
 local function gmStepKeys()
-    local slots = gmSlots()
-    if #slots == 0 then
+    local ammoOn = cfg("gm_ammo") and true or false
+    local slots = gmSlots(ammoOn and gmPool() or {}, ammoOn)
+    local n = #slots
+    if n == 0 then
+        -- nothing has ammo: leave whatever is in hand alone. releasing the
+        -- hotbar key does not unequip a tool
         gmRelease()
+        gmPin, gmCheckAt = nil, 0
         return
     end
-    gmIdx = (gmIdx % #slots) + 1
-    local vk = 0x30 + slots[gmIdx]
+    if n == 1 then
+        -- one gun left with ammo: pin to that gun. its slot is only pressed again
+        -- once that exact gun has left the hand (respawn, manual switch, the game
+        -- unequipping it), never while it is out, so it cannot be pulled out and
+        -- straight back in on the same gun. the ammo filter still flickers this
+        -- list 1 -> 0 -> 1 while the gun reloads, and a dry ticked gun sitting in
+        -- hand does not count as this gun being out
+        local s = slots[1]
+        local vk = 0x30 + s.slot
+        if s.slot ~= gmPin then
+            gmPin, gmCheckAt = s.slot, 0
+        end
+        if gmHeldVk and gmHeldVk ~= vk then gmRelease() end
+        gmHeldVk = vk
+        local now = tick()
+        -- mm2 sometimes swallows the first hotkey press after a switch, so retry a
+        -- quarter second later instead of once a second. a press only happens while
+        -- this gun is NOT in hand, so retrying cannot pump it in and out
+        if now - gmCheckAt < 0.25 then return end
+        gmCheckAt = now
+        if gmOnGun(s.gun) then return end
+        gmRelease()
+        if pcall(keypress, vk) then gmHeldVk = vk end
+        return
+    end
+    gmPin = nil
+    gmIdx = (gmIdx % n) + 1
+    local vk = 0x30 + slots[gmIdx].slot
     gmRelease()
     if pcall(keypress, vk) then gmHeldVk = vk end
 end
@@ -1162,17 +1251,17 @@ local function gmStepEquip()
     local pool, hum = gmPool()
     if not hum or #pool == 0 then return end
     local held = heldToolName()
-    local tool, fallback
+    local tool
     for _, t in ipairs(pool) do
         if t.Name ~= held then
-            if not fallback then fallback = t end
             if not gmToolEmpty(t) then
                 tool = t
                 break
             end
         end
     end
-    if not tool then tool = fallback end
+    -- no other gun has ammo: stay on the gun in hand instead of equipping a
+    -- known-empty one and pulling it back out on the next swap
     if not tool then return end
     pcall(function()
         if cfg("gm_drop") then hum:UnequipTools() end
