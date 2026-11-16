@@ -20,6 +20,13 @@ local CFG = {
     tb_unselkey = 0,
     tb_selvis = true,
 
+    esp_box = true,
+    esp_name = true,
+    esp_skel = false,
+    esp_hp = true,
+    esp_shield = true,
+    esp_dist = 1000,
+
     tb_pred = false,
     tb_dist_pred = false,
     tb_close_dist = 20,
@@ -226,50 +233,6 @@ local function pruneSel()
             SELECTED[p.move] = p.t
             if sv then SELVIS[p.key] = nil; SELVIS[p.move] = sv end
         end
-    end
-end
-
-local function updateSelVis(cam, lens)
-    for k, t in pairs(SELECTED) do
-        local sv = SELVIS[k]
-        if not sv then
-            local box = Drawing.new("Square")
-            box.Filled, box.Color, box.Visible, box.ZIndex = false, Color3.fromRGB(255, 60, 60), false, 4
-            local txt = Drawing.new("Text")
-            txt.Size, txt.Color, txt.Visible, txt.ZIndex, txt.Center, txt.Outline = 13, Color3.fromRGB(255, 60, 60), false, 4, true, true
-            pcall(function() txt.Font = Drawing.Fonts.SystemBold end)
-            txt.Text = "TARGET"
-            sv = { box = box, txt = txt }
-            SELVIS[k] = sv
-        end
-        local show, pos = false
-        local hrp = cfg("tb_selvis") and cfg("tb_sticky") and selRoot(t.character, t)
-        -- a destroyed char still answers FindFirstChild with parts parented to
-        -- nothing, and Position still reads, so a despawned pick would keep
-        -- painting its last spot; only draw while the root is really in the
-        -- character (the respawn-reseat in pruneSel swaps it over fresh)
-        if hrp then
-            local okUp, inTree = pcall(function() return hrp.Parent ~= nil end)
-            if not (okUp and inTree) then hrp = nil end
-        end
-        if hrp then
-            local ok
-            ok, pos = pcall(function() return hrp.Position end)
-            if not ok then pos = nil end
-        end
-        if pos then
-            local sp, onScreen = WorldToScreen(pos)
-            if onScreen then
-                local d = dist3(cam.Position, pos)
-                local pxs = (lens.vp.Y * 0.5) / math.tan(math.rad(lens.fov) * 0.5) / math.max(d, 0.05)
-                local h, w = 5 * pxs, 3 * pxs
-                sv.box.Position = Vector2.new(sp.X - w / 2, sp.Y - h / 2)
-                sv.box.Size = Vector2.new(w, h)
-                sv.txt.Position = Vector2.new(sp.X, sp.Y - h / 2 - 16)
-                show = true
-            end
-        end
-        sv.box.Visible, sv.txt.Visible = show, show
     end
 end
 
@@ -761,11 +724,6 @@ local function step()
     local cx, cy = cursorPos()
 
     pruneSel()
-    do
-        local cam = Workspace.CurrentCamera
-        local lens = lensInfo()
-        if cam and lens then updateSelVis(cam, lens) end
-    end
 
     local localPos = localRootPos()
     local closest0 = findClosest(cx, cy, localPos, true)
@@ -1290,6 +1248,286 @@ local function gmDistFilter(slots)
     end
     if #out == 0 then return slots end
     return out
+end
+
+-- ---------------------------------------------------------------
+-- Target visuals. One drawing set per character, created the first time
+-- that character is on screen and hidden again when it leaves view.
+-- everything is red except the bars: the health bar fades green -> yellow
+-- -> red with the humanoid, and the shield bar (BodyEffects.Armor) is blue.
+-- ---------------------------------------------------------------
+local ESP_RED = Color3.fromRGB(255, 60, 60)
+local ESP_SHIELD = Color3.fromRGB(70, 145, 255)
+local ESP_BAR_BG = Color3.fromRGB(24, 24, 26)
+
+-- r15 limbs, each with the r6 name of the same bone as a fallback
+local ESP_BONES = {
+    { "Head", "UpperTorso" },
+    { "UpperTorso", "LowerTorso" },
+    { "UpperTorso", "LeftUpperArm" },
+    { "LeftUpperArm", "LeftLowerArm" },
+    { "LeftLowerArm", "LeftHand" },
+    { "UpperTorso", "RightUpperArm" },
+    { "RightUpperArm", "RightLowerArm" },
+    { "RightLowerArm", "RightHand" },
+    { "LowerTorso", "LeftUpperLeg" },
+    { "LeftUpperLeg", "LeftLowerLeg" },
+    { "LeftLowerLeg", "LeftFoot" },
+    { "LowerTorso", "RightUpperLeg" },
+    { "RightUpperLeg", "RightLowerLeg" },
+    { "RightLowerLeg", "RightFoot" },
+}
+
+local ESP_ALIAS = {
+    UpperTorso = "Torso", LowerTorso = "Torso",
+    LeftUpperArm = "Left Arm", RightUpperArm = "Right Arm",
+    LeftLowerArm = "Left Arm", RightLowerArm = "Right Arm",
+    LeftHand = "Left Arm", RightHand = "Right Arm",
+    LeftUpperLeg = "Left Leg", RightUpperLeg = "Left Leg",
+    LeftLowerLeg = "Left Leg", RightLowerLeg = "Right Leg",
+    LeftFoot = "Left Leg", RightFoot = "Right Leg",
+}
+
+local espSets = {}
+local espPruneAt = 0
+
+local function espPart(ch, name)
+    local ok, part = pcall(function() return ch:FindFirstChild(name) end)
+    local pos = ok and gmPartPos(part) or nil
+    if pos then return pos end
+    local alt = ESP_ALIAS[name]
+    if not alt then return nil end
+    ok, part = pcall(function() return ch:FindFirstChild(alt) end)
+    return ok and gmPartPos(part) or nil
+end
+
+local function espDrawBar(b, x, y, w, h, frac, color)
+    if not frac then
+        b.bg.Visible, b.fl.Visible = false, false
+        return
+    end
+    if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
+    b.bg.Position = Vector2.new(x, y)
+    b.bg.Size = Vector2.new(w, h)
+    b.bg.Visible = true
+    b.fl.Color = color
+    b.fl.Position = Vector2.new(x, y + h * (1 - frac))
+    b.fl.Size = Vector2.new(w, h * frac)
+    b.fl.Visible = frac > 0.005
+end
+
+local function espHpColor(f)
+    if f > 0.6 then return Color3.fromRGB(70, 220, 120) end
+    if f > 0.3 then return Color3.fromRGB(240, 195, 60) end
+    return Color3.fromRGB(235, 72, 72)
+end
+
+local function espMake()
+    local s = { bones = {}, shown = false, armorMax = 100 }
+
+    local box = Drawing.new("Square")
+    box.Filled, box.Thickness, box.Color, box.Visible = false, 1, ESP_RED, false
+    s.box = box
+
+    local nm = Drawing.new("Text")
+    nm.Size, nm.Color, nm.Center, nm.Outline, nm.Visible = 12, ESP_RED, true, true, false
+    pcall(function() nm.OutlineColor = Color3.fromRGB(0, 0, 0) end)
+    -- plex is the cleanest face the drawing api offers; step down through the
+    -- older font sets for executors that do not ship it
+    for _, key in ipairs({ "Plex", "System", "UI" }) do
+        local okFont = pcall(function() nm.Font = Drawing.Fonts[key] end)
+        if okFont then break end
+    end
+    s.name = nm
+
+    for i = 1, #ESP_BONES do
+        local l = Drawing.new("Line")
+        l.Thickness, l.Color, l.Visible = 1, ESP_RED, false
+        s.bones[i] = l
+    end
+
+    for _, k in ipairs({ "hp", "sh" }) do
+        local bg = Drawing.new("Square")
+        bg.Filled, bg.Color, bg.Visible = true, ESP_BAR_BG, false
+        local fl = Drawing.new("Square")
+        fl.Filled, fl.Visible = true, false
+        s[k] = { bg = bg, fl = fl }
+    end
+
+    return s
+end
+
+local function espHide(s)
+    s.box.Visible, s.name.Visible = false, false
+    for i = 1, #s.bones do s.bones[i].Visible = false end
+    s.hp.bg.Visible, s.hp.fl.Visible = false, false
+    s.sh.bg.Visible, s.sh.fl.Visible = false, false
+    s.shown = false
+end
+
+-- armor is the shield here. the ceiling is per character and starts at 100 so
+-- a plain 100 armour player fills the bar, while servers that hand out more
+-- (200 was seen) stretch it instead of overflowing
+local function espShieldFrac(s, ch)
+    local ok, be = pcall(function() return ch:FindFirstChild("BodyEffects") end)
+    if not ok or not be then return nil end
+    local okA, armor = pcall(function()
+        local a = be:FindFirstChild("Armor")
+        return a and tonumber(a.Value)
+    end)
+    if not okA or not armor then return nil end
+    if armor > s.armorMax then s.armorMax = armor end
+    return armor / math.max(s.armorMax, 1)
+end
+
+local function updateESP()
+    -- selected targets only, the same players the old target visuals drew for:
+    -- nothing is painted for somebody you have not picked, and every feature
+    -- has its own toggle in the sticky aim card
+    local cam = Workspace.CurrentCamera
+    local lens = (cfg("tb_selvis") and cam) and lensInfo() or nil
+    if not lens then
+        for _, s in pairs(espSets) do
+            if s.shown then espHide(s) end
+        end
+        return
+    end
+
+    local maxDist = tonumber(cfg("esp_dist")) or 1000
+    local wantBox = cfg("esp_box") == true
+    local wantName = cfg("esp_name") == true
+    local wantSkel = cfg("esp_skel") == true
+    local wantHp = cfg("esp_hp") == true
+    local wantSh = cfg("esp_shield") == true
+    local now = tick()
+    local seen = {}
+
+    for key, t in pairs(SELECTED) do
+        local ch = t.character
+        local inTree = false
+        if ch then
+            local okTree, live = pcall(function() return ch.Parent ~= nil end)
+            inTree = okTree and live == true
+        end
+        local pos = inTree and gmRootPos(ch) or nil
+        local sp, onScreen = nil, false
+        if pos and (maxDist <= 0 or dist3(cam.Position, pos) <= maxDist) then
+            sp, onScreen = WorldToScreen(pos)
+        end
+
+        local s = espSets[key]
+        if onScreen and sp then
+            if not s then
+                s = espMake()
+                espSets[key] = s
+            end
+            seen[key] = true
+            s.seenAt, s.shown = now, true
+
+            local d = dist3(cam.Position, pos)
+            local pxs = (lens.vp.Y * 0.5) / math.tan(math.rad(lens.fov) * 0.5) / math.max(d, 0.05)
+            local bh, bw = 5 * pxs, 3 * pxs
+            local bx, by = sp.X - bw / 2, sp.Y - bh / 2
+
+            s.box.Color = ESP_RED
+            s.box.Thickness = 2
+            s.box.Position = Vector2.new(bx, by)
+            s.box.Size = Vector2.new(bw, bh)
+            s.box.Visible = wantBox
+
+            s.name.Text = tostring(t.player and t.player.Name or ch.Name)
+            s.name.Position = Vector2.new(sp.X, by - 17)
+            s.name.Visible = wantName
+
+            for i, bone in ipairs(ESP_BONES) do
+                local line = s.bones[i]
+                local a, b = nil, nil
+                if wantSkel then
+                    a, b = espPart(ch, bone[1]), espPart(ch, bone[2])
+                end
+                if a and b then
+                    local p1, v1 = WorldToScreen(a)
+                    local p2, v2 = WorldToScreen(b)
+                    if v1 and v2 then
+                        line.From, line.To = p1, p2
+                        line.Visible = true
+                    else
+                        line.Visible = false
+                    end
+                else
+                    line.Visible = false
+                end
+            end
+
+            local hf = nil
+            if wantHp then
+                local hum = ch:FindFirstChildOfClass("Humanoid")
+                local mx = hum and tonumber(hum.MaxHealth) or 0
+                if mx and mx > 0 then hf = (tonumber(hum.Health) or 0) / mx end
+            end
+            if hf then
+                espDrawBar(s.hp, bx - 6, by, 3, bh, hf, espHpColor(hf))
+            else
+                s.hp.bg.Visible, s.hp.fl.Visible = false, false
+            end
+
+            local sf = wantSh and espShieldFrac(s, ch) or nil
+            if sf then
+                espDrawBar(s.sh, bx - 11, by, 3, bh, sf, ESP_SHIELD)
+            else
+                s.sh.bg.Visible, s.sh.fl.Visible = false, false
+            end
+        end
+    end
+
+    -- a pick that got unselected, died or walked off screen stops drawing here
+    for key, s in pairs(espSets) do
+        if not seen[key] and s.shown then espHide(s) end
+    end
+
+    if now - espPruneAt > 3 then
+        espPruneAt = now
+        for key, s in pairs(espSets) do
+            if not SELECTED[key] then
+                espHide(s)
+                pcall(function()
+                    s.box:Remove()
+                    s.name:Remove()
+                    for _, l in ipairs(s.bones) do l:Remove() end
+                    s.hp.bg:Remove(); s.hp.fl:Remove()
+                    s.sh.bg:Remove(); s.sh.fl:Remove()
+                end)
+                espSets[key] = nil
+            end
+        end
+    end
+end
+
+local espErr = nil
+local function espSafe()
+    local ok, err = pcall(updateESP)
+    if not ok and err ~= espErr then
+        espErr = err
+        warn("target visuals error: " .. tostring(err))
+    end
+end
+
+local espHooked = false
+pcall(function()
+    local rs = game:GetService("RunService")
+    if rs and rs.RenderStepped then
+        rs.RenderStepped:Connect(espSafe)
+        espHooked = true
+    end
+end)
+
+if not espHooked then
+    spawn(function()
+        while true do
+            espSafe()
+            wait(0.01)
+        end
+    end)
 end
 
 -- let go of whatever key the last swap pressed
@@ -2595,6 +2833,12 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "key", id = "tb_selkey", label = "Select key" },
                 { kind = "key", id = "tb_unselkey", label = "Unselect key" },
                 { kind = "toggle", id = "tb_selvis", label = "Target visuals" },
+                { kind = "toggle", id = "esp_box", label = "Box" },
+                { kind = "toggle", id = "esp_name", label = "Name" },
+                { kind = "toggle", id = "esp_skel", label = "Skeleton" },
+                { kind = "toggle", id = "esp_hp", label = "Health bar" },
+                { kind = "toggle", id = "esp_shield", label = "Shield bar" },
+                { kind = "slider", id = "esp_dist", label = "Max dist", min = 0, max = 2000, fmt = "%d" },
             },
         },
         prediction = {
