@@ -61,6 +61,7 @@ local CFG = {
     gm_link = false,
     gm_link_ms = 0,
     gm_ammo = true,
+    gm_dist_on = false, -- only spam guns whose own range reaches the nearest enemy
     gm_drop = false,
     gm_rev = true,
     gm_db = true,
@@ -986,13 +987,13 @@ end
 -- the fire cooldown resets, which reads as a much faster shot rate
 -- =====================================================================
 local GM_GUNS = {
-    { cfgid = "gm_rev", slotid = "gm_rev_slot", test = function(low)
+    { cfgid = "gm_rev", slotid = "gm_rev_slot", distid = "tb_rev_dist", useid = "tb_rev_on", test = function(low)
         return low:find("revolver", 1, true) ~= nil
     end },
-    { cfgid = "gm_db", slotid = "gm_db_slot", test = function(low)
+    { cfgid = "gm_db", slotid = "gm_db_slot", distid = "tb_db_dist", useid = "tb_db_on", test = function(low)
         return low:find("double", 1, true) ~= nil and low:find("barrel", 1, true) ~= nil
     end },
-    { cfgid = "gm_tac", slotid = "gm_tac_slot", test = function(low)
+    { cfgid = "gm_tac", slotid = "gm_tac_slot", distid = "tb_tac_dist", useid = "tb_tac_on", test = function(low)
         return low == "tac"
             or (low:find("tac", 1, true) ~= nil and low:find("shotgun", 1, true) ~= nil)
     end },
@@ -1180,6 +1181,117 @@ local function gmSlots(pool, ammoOn)
     return out
 end
 
+-- distance based: a gun only spams while the enemy is inside that gun's own
+-- weapon check in the weapons tab. of the guns that reach, the shortest range
+-- wins, so shotguns take over up close and the revolver is only pressed once
+-- they run dry (the ammo filter has already dropped the dry ones by then).
+-- guns set to the same range sit in one group and swap together
+local function gmRange(g)
+    -- unticked weapon check: no limit there, so this gun is the long range
+    -- fallback rather than one of the close range tiers
+    if g.useid and not cfg(g.useid) then return math.huge end
+    local r = tonumber(cfg(g.distid))
+    if not r or r <= 0 then return math.huge end
+    return r
+end
+
+-- a character's position, asked part by part. PrimaryPart and Humanoid.RootPart
+-- come back unusable on these rigs, and taking either first made the whole
+-- distance gate quietly switch itself off, so a candidate only counts once its
+-- Position actually reads back as a vector
+local function gmPartPos(part)
+    if not part then return nil end
+    local ok, pos = pcall(function() return part.Position end)
+    if ok and pos and type(pos.X) == "number" then return pos end
+    return nil
+end
+
+local GM_ROOT_NAMES = { "HumanoidRootPart", "Root", "Torso", "UpperTorso", "LowerTorso", "Head" }
+
+local function gmRootPos(model)
+    if not model then return nil end
+    for _, name in ipairs(GM_ROOT_NAMES) do
+        local ok, part = pcall(function() return model:FindFirstChild(name) end)
+        local pos = ok and gmPartPos(part) or nil
+        if pos then return pos end
+    end
+    local ok, pos = pcall(function()
+        local hum = model:FindFirstChildOfClass("Humanoid")
+        return gmPartPos(hum and hum.RootPart) or gmPartPos(model.PrimaryPart)
+    end)
+    return ok and pos or nil
+end
+
+-- asked at most ten times a second: the macro ticks far faster than a player
+-- closes the gap, and walking the target list on every swap adds up
+local gmDistAt, gmDistVal = 0, nil
+
+local function gmNearestDist()
+    local now = tick()
+    if now - gmDistAt < 0.1 then return gmDistVal end
+    gmDistAt = now
+    local lp = localPlayer()
+    local char = lp and lp.Character
+    local me = gmRootPos(char)
+    if not me then
+        gmDistVal = nil
+        return nil
+    end
+    -- the target the triggerbot is actually shooting wins whenever one is
+    -- locked, so a knocked body or a bot standing next to you cannot drag the
+    -- macro down to close range
+    local bot = _G.StellarTriggerbot
+    local locked = bot and bot.LockedTarget
+    if locked and locked ~= char then
+        local lpos = gmRootPos(locked)
+        if lpos then
+            gmDistVal = dist3(me, lpos)
+            return gmDistVal
+        end
+    end
+    local skipKo = cfg("tb_knock")
+    local best = nil
+    for _, t in ipairs(collectTargets()) do
+        if t.character ~= char then
+            local pos = gmRootPos(t.character)
+            if pos and (pos.X ~= 0 or pos.Y ~= 0 or pos.Z ~= 0)
+                and not (skipKo and isKnocked(t.character)) then
+                local d = dist3(me, pos)
+                if not best or d < best then best = d end
+            end
+        end
+    end
+    gmDistVal = best
+    return best
+end
+
+-- keep only the tightest range group that reaches the enemy. when nothing is in
+-- range the longest range is used rather than the whole cycle, so at distance
+-- only the long gun keeps firing instead of the macro swapping to the shotguns
+local function gmDistFilter(slots)
+    if not cfg("gm_dist_on") then return slots end
+    local d = gmNearestDist()
+    if not d then return slots end
+    local best, far = nil, nil
+    for _, s in ipairs(slots) do
+        local r = gmRange(s.gun)
+        if d <= r then
+            -- first reach sets the tier, so an unlimited (math.huge) gun still wins
+            if best == nil or r < best then best = r end
+        elseif r < math.huge then
+            if not far or r > far then far = r end
+        end
+    end
+    local want = best or far
+    if not want then return slots end
+    local out = {}
+    for _, s in ipairs(slots) do
+        if gmRange(s.gun) == want then out[#out + 1] = s end
+    end
+    if #out == 0 then return slots end
+    return out
+end
+
 -- let go of whatever key the last swap pressed
 local function gmRelease()
     if gmHeldVk then
@@ -1205,7 +1317,7 @@ end
 -- press the next ticked gun's hotbar key and hold it until the next swap
 local function gmStepKeys()
     local ammoOn = cfg("gm_ammo") and true or false
-    local slots = gmSlots(ammoOn and gmPool() or {}, ammoOn)
+    local slots = gmDistFilter(gmSlots(ammoOn and gmPool() or {}, ammoOn))
     local n = #slots
     if n == 0 then
         -- nothing has ammo: leave whatever is in hand alone. releasing the
@@ -1251,10 +1363,15 @@ local function gmStepEquip()
     local pool, hum = gmPool()
     if not hum or #pool == 0 then return end
     local held = heldToolName()
+    -- same distance gate as the key method, so both methods pick the same gun
+    local allow = {}
+    for _, s in ipairs(gmDistFilter(gmSlots(pool, cfg("gm_ammo") and true or false))) do
+        allow[#allow + 1] = s.gun
+    end
     local tool
     for _, t in ipairs(pool) do
         if t.Name ~= held then
-            if not gmToolEmpty(t) then
+            if not gmToolEmpty(t) and gmWanted(t.Name, allow) then
                 tool = t
                 break
             end
@@ -2455,6 +2572,7 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "cycle", id = "gm_method", label = "Method",
                     options = { "keys", "equip" } },
                 { kind = "slider", id = "gm_delay", label = "Swap delay", min = 10, max = 400, fmt = "%dms" },
+                { kind = "toggle", id = "gm_dist_on", label = "Distance based" },
                 { kind = "toggle", id = "gm_link", label = "Link to triggerbot" },
                 { kind = "slider", id = "gm_link_ms", label = "Linger", min = 0, max = 500, fmt = "%dms" },
             },
