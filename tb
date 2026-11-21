@@ -27,6 +27,32 @@ local CFG = {
     esp_shield = true,
     esp_dist = 1000,
 
+    tb_pred = false,
+    tb_dist_pred = false,
+    tb_close_dist = 20,
+    tb_mid_dist = 50,
+    tb_close_x = 0.15,
+    tb_close_y = 0.15,
+    tb_mid_x = 0.15,
+    tb_mid_y = 0.15,
+    tb_far_x = 0.15,
+    tb_far_y = 0.15,
+    tb_pred_x = 0.15,
+    tb_pred_y = 0.15,
+    tb_pred_smooth = 0.4,
+
+    tb_humanize = false,
+    tb_delay_min = 30,
+    tb_delay_max = 120,
+    tb_int_min = 80,
+    tb_int_max = 160,
+    tb_hold_min = 15,
+    tb_hold_max = 55,
+    tb_hes_chance = 10,
+    tb_hes_min = 150,
+    tb_hes_max = 450,
+    tb_fatigue = 8,
+
     tb_knock = true, -- skip knocked (K.O) players
 
     tb_wepcheck = false,
@@ -401,36 +427,16 @@ local function isKnocked(ch)
 end
 
 -- distance cap for whichever weapon is currently held
-local heldName, heldNameAt = nil, 0
-
-local function heldToolNameNow()
+local function heldToolName()
     local lp = localPlayer()
     local char = lp and lp.Character
-    if not char then return nil end
     local ok, name = pcall(function()
-        -- the tool that entered the character last is the one in hand. a gun the
-        -- game left parented after a swap was added earlier, so taking the first
-        -- child could name the gun you just put away, and the macro would think
-        -- the revolver was already out and never press its slot
-        local last
         for _, d in ipairs(char:GetChildren()) do
             -- IsA lies on this executor, compare ClassName directly
-            if d.ClassName == "Tool" then last = d.Name end
+            if d.ClassName == "Tool" then return d.Name end
         end
-        return last
     end)
     return ok and name or nil
-end
-
--- the macro asks for the gun in hand on every swap step, and each ask was a full
--- walk of the character's children plus a fresh closure. a couple of frames of
--- staleness is invisible and takes that walk out of the hot path
-local function heldToolName()
-    local now = tick()
-    if now - heldNameAt < 0.03 then return heldName end
-    heldNameAt = now
-    heldName = heldToolNameNow()
-    return heldName
 end
 
 local function wepCap()
@@ -956,10 +962,6 @@ local gmNext, gmErr = 0, nil
 local gmHeldVk, gmIdx, gmCheckAt = nil, 0, 0
 local gmPin = nil
 
--- forward: both live further down, and the link gate needs them to see whether
--- an enemy is inside the longest ticked gun's reach
-local gmRange, gmNearestDist
-
 local function gmActive()
     if not cfg("gm_on") then return false end
     if cfg("gm_link") then
@@ -967,36 +969,7 @@ local function gmActive()
         -- a linger above 0 keeps the spam alive briefly after it disengages.
         if tbEngaged then return true end
         local linger = (tonumber(cfg("gm_link_ms")) or 0) / 1000
-        if linger > 0 and (tick() - lastFireAt) <= linger then return true end
-        -- the trigger only targets as far as the gun in hand reaches, so with a
-        -- shotgun out past its own check it never engages, this gate never
-        -- opened, and the swap to the revolver never ran at all: the macro sat
-        -- on the empty range gun forever. while distance switching is on, an
-        -- enemy inside the longest ticked gun's reach keeps it alive, so the gun
-        -- is allowed to change first and the trigger can engage again after
-        -- and only while the trigger is actually live: distance alone used to
-        -- open this gate with the key up, so the macro changed guns while you
-        -- were not firing at anybody. toggle and always count as live as well,
-        -- or a trigger left in toggle mode could never unblock the swap it needs
-        local tmode = cfg("tb_kbmode")
-        local trigLive = cfg("tb_enabled")
-            and ((tmode == "always") or (tmode == "toggle" and kbOn) or vkHeld(cfg("tb_key") or 0))
-        if cfg("gm_dist_on") and trigLive then
-            -- the reach is taken over every gun, ticked or not: the revolver is
-            -- pulled at range even with its box in the macro list empty, so
-            -- counting only the ticked ones left this gate shut on a far enemy
-            -- and the macro never got off the shotgun in hand
-            local d = gmNearestDist()
-            if d then
-                local far = 0
-                for _, g in ipairs(GM_GUNS) do
-                    local r = gmRange(g)
-                    if r ~= math.huge and r > far then far = r end
-                end
-                if far > 0 and d <= far then return true end
-            end
-        end
-        return false
+        return linger > 0 and (tick() - lastFireAt) <= linger
     end
     local mode = cfg("gm_mode")
     if mode == "always" then return true end
@@ -1158,9 +1131,6 @@ local function gmSlots(pool, ammoOn)
     for _, g in ipairs(GM_GUNS) do
         if cfg(g.cfgid) then
             local slot = tonumber(cfg(g.slotid))
-            -- a gun reading empty drops out of the cycle, so the guns with ammo
-            -- keep swapping. no readable ammo stays in, so an unknown source
-            -- never blocks anything
             if slot and slot >= 1 and slot <= 9 and not gmGunEmpty(g, pool, ammoOn) then
                 out[#out + 1] = { slot = slot, gun = g }
             end
@@ -1170,10 +1140,11 @@ local function gmSlots(pool, ammoOn)
 end
 
 -- distance based: a gun only spams while the enemy is inside that gun's own
--- weapon check in the weapons tab. guns set to the same range sit in one group
--- and swap together, so db + tac spam up close and the revolver takes over once
--- the enemy is past their checks
-function gmRange(g)
+-- weapon check in the weapons tab. of the guns that reach, the shortest range
+-- wins, so shotguns take over up close and the revolver is only pressed once
+-- they run dry (the ammo filter has already dropped the dry ones by then).
+-- guns set to the same range sit in one group and swap together
+local function gmRange(g)
     -- unticked weapon check: no limit there, so this gun is the long range
     -- fallback rather than one of the close range tiers
     if g.useid and not cfg(g.useid) then return math.huge end
@@ -1213,10 +1184,7 @@ end
 -- closes the gap, and walking the target list on every swap adds up
 local gmDistAt, gmDistVal = 0, nil
 
--- the macro needs the distance to the fight, not to the nearest body: a player
--- standing beside you used to keep the shotguns selected while you were shooting
--- somebody across the street, so the revolver was never taken out
-function gmNearestDist()
+local function gmNearestDist()
     local now = tick()
     if now - gmDistAt < 0.1 then return gmDistVal end
     gmDistAt = now
@@ -1227,214 +1195,56 @@ function gmNearestDist()
         gmDistVal = nil
         return nil
     end
-
-    local function dOf(model)
-        if not model or model == char then return nil end
-        local p = gmRootPos(model)
-        if not p or (p.X == 0 and p.Y == 0 and p.Z == 0) then return nil end
-        return dist3(me, p)
-    end
-
-    -- 1. whoever the crosshair is on. this is the player you are looking at,
-    --    and it is asked first: the triggerbot lock and the old picks used to
-    --    outrank it, which kept the shotguns out while the enemy under the
-    --    crosshair walked past their reach
-    -- the crosshair is the middle of the viewport, not the mouse. executors
-    -- report the mouse in desktop space, a title bar taller than the view, so
-    -- the cursor can sit outside the view and the old code had to clamp it onto
-    -- the edge and hope. the middle of the view is where the crosshair really is
-    local cam = Workspace.CurrentCamera
-    local vp = cam and cam.ViewportSize
-    local cx, cy = nil, nil
-    if vp and vp.X and vp.Y then
-        cx, cy = vp.X / 2, vp.Y / 2
-    else
-        cx, cy = cursorPos()
-    end
-    -- where a world point lands on screen, or nil when it does not project
-    local function px(p)
-        local ok, sp, on = pcall(function()
-            local scr, vis = WorldToScreen(p)
-            return scr, vis
-        end)
-        if ok and sp and on then return sp end
-        return nil
-    end
-    -- pixels from the crosshair to the line down the middle of a player, head to
-    -- feet, plus that line's length: the chest sits between the two, so it has to
-    -- count as being under the crosshair as well, not just the head and the feet
-    local function segPx(ax, ay, bx, by)
-        local vx, vy = bx - ax, by - ay
-        local len = math.sqrt(vx * vx + vy * vy)
-        local tt = 0
-        if len > 0 then
-            tt = ((cx - ax) * vx + (cy - ay) * vy) / (len * len)
-            if tt < 0 then tt = 0 elseif tt > 1 then tt = 1 end
+    -- the target the triggerbot is actually shooting wins whenever one is
+    -- locked, so a knocked body or a bot standing next to you cannot drag the
+    -- macro down to close range
+    local bot = _G.StellarTriggerbot
+    local locked = bot and bot.LockedTarget
+    if locked and locked ~= char then
+        local lpos = gmRootPos(locked)
+        if lpos then
+            gmDistVal = dist3(me, lpos)
+            return gmDistVal
         end
-        local dx, dy = cx - (ax + vx * tt), cy - (ay + vy * tt)
-        return math.sqrt(dx * dx + dy * dy), len
     end
-    -- the player the crosshair is actually on, and how far off his middle line
-    -- that is as a fraction of his own width, so the closest one wins
-    local onD, onScore = nil, nil
     local skipKo = cfg("tb_knock")
+    local best = nil
     for _, t in ipairs(collectTargets()) do
-        if not (skipKo and isKnocked(t.character)) then
+        if t.character ~= char then
             local pos = gmRootPos(t.character)
-            if pos and (pos.X ~= 0 or pos.Y ~= 0 or pos.Z ~= 0) then
+            if pos and (pos.X ~= 0 or pos.Y ~= 0 or pos.Z ~= 0)
+                and not (skipKo and isKnocked(t.character)) then
                 local d = dist3(me, pos)
-                -- head and feet both: the root alone projects far below the
-                -- crosshair up close, so the middle of the body has to be treated
-                -- as a line between the two rather than as one point
-                local okHead, headPart = pcall(function() return t.character:FindFirstChild("Head") end)
-                local head = okHead and gmPartPos(headPart) or nil
-                if cx and cy then
-                    local pr = px(pos)
-                    local ph = head and px(head) or nil
-                    local p1 = ph or pr
-                    if p1 then
-                        local off, len, half
-                        if pr and ph then
-                            off, len = segPx(ph.X, ph.Y, pr.X, pr.Y)
-                            -- a rig is about two studs across against five tall, so
-                            -- a quarter of the head to feet line is its own half
-                            -- width. the crosshair only counts as on him inside
-                            -- that: aiming beside a player used to pull guns too
-                            half = math.max(8, len * 0.25)
-                        else
-                            local dx, dy = p1.X - cx, p1.Y - cy
-                            off = math.sqrt(dx * dx + dy * dy)
-                            -- only one point of the body could be projected: the
-                            -- root stands in for the whole rig, so it gets a body
-                            -- sized radius instead of a line to measure against
-                            half = 48
-                        end
-                        if off <= half then
-                            local score = off / half
-                            if not onScore or score < onScore then
-                                onD, onScore = d, score
-                            end
-                        end
-                    end
-                end
+                if not best or d < best then best = d end
             end
         end
     end
-    if onD then
-        gmDistVal = onD
-        return onD
-    end
-
-    -- 1b. the same test done with the angle instead of pixels. past eighty
-    --     studs a rig is only a few pixels tall, so the line test above needs the
-    --     crosshair almost exactly on his body and a man filling the middle of
-    --     the screen still failed it. the angle between the camera's forward
-    --     axis and the line to his middle is that same test in studs, and its
-    --     tolerance grows with the distance the way his shoulders do, so a
-    --     faraway enemy reads as aimed at instead of as nothing at all. this is
-    --     what lets the weapon checks pick the gun at long range: with a shotgun
-    --     in hand past its own check the triggerbot drops him, the lock below
-    --     never fires, and the distance used to come back empty
-    local camCF = nil
-    pcall(function() camCF = Workspace.CurrentCamera.CFrame end)
-    if camCF and camCF.LookVector then
-        local cpos, look = camCF.Position, camCF.LookVector
-        local bestD, bestOff = nil, nil
-        for _, t in ipairs(collectTargets()) do
-            if not (skipKo and isKnocked(t.character)) then
-                local pos = gmRootPos(t.character)
-                if pos and (pos.X ~= 0 or pos.Y ~= 0 or pos.Z ~= 0) then
-                    local d = dist3(me, pos)
-                    local vx, vy, vz = pos.X - cpos.X, pos.Y - cpos.Y, pos.Z - cpos.Z
-                    local vl = math.sqrt(vx * vx + vy * vy + vz * vz)
-                    if vl > 0.5 then
-                        local dot = (vx * look.X + vy * look.Y + vz * look.Z) / vl
-                        if dot > 1 then dot = 1 end
-                        if dot > 0 then
-                            -- half his shoulder width, plus a hair, so aiming at
-                            -- the arms or just over his head still counts as him
-                            local tol = math.atan(3.2 / d) + 0.012
-                            local off = math.acos(dot)
-                            if off <= tol and (not bestOff or off < bestOff) then
-                                bestD, bestOff = d, off
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        if bestD then
-            gmDistVal = bestD
-            return bestD
-        end
-    end
-
-    -- 2. the triggerbot's lock, but only while the trigger is actually firing at
-    --    it: a lock that outlives the crosshair is not "looking at him", and
-    --    acting on it pulled the revolver out at nothing
-    if tbEngaged then
-        local bot = _G.StellarTriggerbot
-        local locked = bot and bot.LockedTarget
-        if locked and locked ~= char then
-            local d = dOf(locked)
-            if d then
-                gmDistVal = d
-                return d
-            end
-        end
-    end
-
-    -- 3. nobody under the crosshair: no distance at all. the macro only changes
-    --    guns at somebody you are aiming at, so this has to stay nil instead of
-    --    falling back to the nearest body: that fallback swapped the revolver in
-    --    whenever an enemy was merely somewhere in range, even facing away
-    gmDistVal = nil
-    return nil
+    gmDistVal = best
+    return best
 end
 
--- close guns vs the distance gun. every gun whose own weapon check reaches the
--- enemy is usable; the longest reaching one is the distance gun and the rest are
--- the close guns. so up front the double barrel and tac shotgun spam together,
--- and once the enemy is past their checks only the revolver is left. when
--- nothing reaches, the longest range is the fallback rather than the whole
--- cycle, so the macro does not shuffle through shotguns it cannot hit with
+-- keep only the tightest range group that reaches the enemy. when nothing is in
+-- range the longest range is used rather than the whole cycle, so at distance
+-- only the long gun keeps firing instead of the macro swapping to the shotguns
 local function gmDistFilter(slots)
-    -- off: the whole ticked list, so the macro is a plain cycle of every gun in
-    -- the macro card whatever the weapon checks say
     if not cfg("gm_dist_on") then return slots end
     local d = gmNearestDist()
     if not d then return slots end
-    -- up close: every close gun whose own check reaches the enemy spams with
-    -- the rest, so the double barrel and the tac keep alternating even when
-    -- their two sliders are set a few studs apart. the revolver is left out of
-    -- the close pair by name, which is the point of the distance toggle
-    local close = {}
-    for _, s in ipairs(slots) do
-        if s.gun.cfgid ~= "gm_rev" then
-            local r = gmRange(s.gun)
-            if d <= r then close[#close + 1] = s end
-        end
-    end
-    if #close > 0 then return close end
-    -- past every close check: the longest check that still reaches is the gun
-    -- for that range, so the revolver comes out on its own. with nothing in
-    -- reach the longest check there is wins, so at distance the macro holds the
-    -- long gun instead of cycling shotguns it cannot hit with
-    local best = nil
+    local best, far = nil, nil
     for _, s in ipairs(slots) do
         local r = gmRange(s.gun)
-        if d <= r and (best == nil or r > best) then best = r end
-    end
-    if best == nil then
-        for _, s in ipairs(slots) do
-            local r = gmRange(s.gun)
-            if r < math.huge and (best == nil or r > best) then best = r end
+        if d <= r then
+            -- first reach sets the tier, so an unlimited (math.huge) gun still wins
+            if best == nil or r < best then best = r end
+        elseif r < math.huge then
+            if not far or r > far then far = r end
         end
     end
-    if best == nil then return slots end
+    local want = best or far
+    if not want then return slots end
     local out = {}
     for _, s in ipairs(slots) do
-        if gmRange(s.gun) == best then out[#out + 1] = s end
+        if gmRange(s.gun) == want then out[#out + 1] = s end
     end
     if #out == 0 then return slots end
     return out
@@ -1741,8 +1551,9 @@ local function gmOnGun(g)
     end
     return false
 end
+
 -- press the next ticked gun's hotbar key and hold it until the next swap
-local function gmStepKeys(now)
+local function gmStepKeys()
     local ammoOn = cfg("gm_ammo") and true or false
     local slots = gmDistFilter(gmSlots(ammoOn and gmPool() or {}, ammoOn))
     local n = #slots
@@ -1779,10 +1590,6 @@ local function gmStepKeys(now)
         return
     end
     gmPin = nil
-    -- straight cycle: press the next ticked gun's hotkey on every step and let
-    -- the game keep up. nothing waits for the last swap to land, so a press the
-    -- game swallows is simply followed by the next one in the cycle, and the
-    -- swap delay is the only thing pacing the spam
     gmIdx = (gmIdx % n) + 1
     local vk = 0x30 + slots[gmIdx].slot
     gmRelease()
@@ -1820,18 +1627,17 @@ end
 local function gmStep()
     if not gmActive() then
         gmRelease()
-        -- the next hold reads the game fresh and swaps on its first step
-        gmNext = 0
         return
     end
     local now = tick()
     if now < gmNext then return end
     local delay = (tonumber(cfg("gm_delay")) or 60) / 1000
     gmNext = now + math.max(delay, 0.01)
+
     if cfg("gm_method") == "equip" then
         gmStepEquip()
     else
-        gmStepKeys(now)
+        gmStepKeys()
     end
 end
 
@@ -2923,9 +2729,13 @@ local okNew, m = pcall(MenuLib.new, {
         } },
         { label = "Target", items = {
             { label = "Targeting", tab = 3 },
+            { label = "Accuracy", tab = 4 },
+        } },
+        { label = "Behavior", items = {
+            { label = "Humanization", tab = 5 },
         } },
         { label = "Profile", items = {
-            { label = "Configs", tab = 4 },
+            { label = "Configs", tab = 6 },
         } },
     },
     tabs = {
@@ -2939,7 +2749,9 @@ local okNew, m = pcall(MenuLib.new, {
             { id = "gmguns", col = 2 },
         },
         [3] = { "sticky" },
-        [4] = { "profile", "saved" },
+        [4] = { "prediction", "bands" },
+        [5] = { "humanize", "hesitation" },
+        [6] = { "profile", "saved" },
     },
     cards = {
         main = {
@@ -3027,6 +2839,50 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "toggle", id = "esp_hp", label = "Health bar" },
                 { kind = "toggle", id = "esp_shield", label = "Shield bar" },
                 { kind = "slider", id = "esp_dist", label = "Max dist", min = 0, max = 2000, fmt = "%d" },
+            },
+        },
+        prediction = {
+            title = "Prediction",
+            toggle = "tb_pred",
+            rows = {
+                { kind = "slider", id = "tb_pred_x", label = "X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_pred_y", label = "Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_pred_smooth", label = "Vel smooth", min = 0.0, max = 0.9, fmt = "%.2f" },
+                { kind = "toggle", id = "tb_dist_pred", label = "Distance based" },
+            },
+        },
+        bands = {
+            title = "Distance bands",
+            rows = {
+                { kind = "slider", id = "tb_close_dist", label = "Close dist", min = 1, max = 150, fmt = "%d" },
+                { kind = "slider", id = "tb_close_x", label = "Close X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_close_y", label = "Close Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_mid_dist", label = "Mid dist", min = 1, max = 300, fmt = "%d" },
+                { kind = "slider", id = "tb_mid_x", label = "Mid X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_mid_y", label = "Mid Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_far_x", label = "Far X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_far_y", label = "Far Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+            },
+        },
+        humanize = {
+            title = "Humanize",
+            toggle = "tb_humanize",
+            rows = {
+                { kind = "slider", id = "tb_delay_min", label = "React min", min = 0, max = 500, fmt = "%dms" },
+                { kind = "slider", id = "tb_delay_max", label = "React max", min = 0, max = 500, fmt = "%dms" },
+                { kind = "slider", id = "tb_int_min", label = "Interval min", min = 0, max = 1000, fmt = "%dms" },
+                { kind = "slider", id = "tb_int_max", label = "Interval max", min = 0, max = 1000, fmt = "%dms" },
+                { kind = "slider", id = "tb_hold_min", label = "Hold min", min = 0, max = 300, fmt = "%dms" },
+                { kind = "slider", id = "tb_hold_max", label = "Hold max", min = 0, max = 300, fmt = "%dms" },
+            },
+        },
+        hesitation = {
+            title = "Hesitation",
+            rows = {
+                { kind = "slider", id = "tb_hes_chance", label = "Chance", min = 0, max = 100, fmt = "%d%%" },
+                { kind = "slider", id = "tb_hes_min", label = "Min", min = 0, max = 2000, fmt = "%dms" },
+                { kind = "slider", id = "tb_hes_max", label = "Max", min = 0, max = 2000, fmt = "%dms" },
+                { kind = "slider", id = "tb_fatigue", label = "Fatigue", min = 0, max = 100, fmt = "%dms" },
             },
         },
         profile = {
