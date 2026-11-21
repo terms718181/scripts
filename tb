@@ -1158,11 +1158,11 @@ local function gmSlots(pool, ammoOn)
     for _, g in ipairs(GM_GUNS) do
         if cfg(g.cfgid) then
             local slot = tonumber(cfg(g.slotid))
-            if slot and slot >= 1 and slot <= 9 then
-                -- a dry gun stays in the list: the distance tier still has to
-                -- know that it reaches, and it is only skipped later when a gun
-                -- in the same tier actually has ammo
-                out[#out + 1] = { slot = slot, gun = g, dry = gmGunEmpty(g, pool, ammoOn) and true or false }
+            -- a gun reading empty drops out of the cycle, so the guns with ammo
+            -- keep swapping. no readable ammo stays in, so an unknown source
+            -- never blocks anything
+            if slot and slot >= 1 and slot <= 9 and not gmGunEmpty(g, pool, ammoOn) then
+                out[#out + 1] = { slot = slot, gun = g }
             end
         end
     end
@@ -1180,23 +1180,6 @@ function gmRange(g)
     local r = tonumber(cfg(g.distid))
     if not r or r <= 0 then return math.huge end
     return r
-end
-
--- the gun with the longest finite weapon check, whether or not it is ticked in
--- the gun macro list. the distance checks say which gun covers an enemy and the
--- macro list says what gets spammed up close, so the revolver can still be
--- pulled at range and as the last resort with its box in that list empty
-local function gmFarGun(minR)
-    local best, bestR = nil, minR or 0
-    for _, g in ipairs(GM_GUNS) do
-        local r = gmRange(g)
-        local slot = tonumber(cfg(g.slotid))
-        if r ~= math.huge and r > bestR and slot and slot >= 1 and slot <= 9 then
-            best, bestR = g, r
-        end
-    end
-    if not best then return nil end
-    return { slot = tonumber(cfg(best.slotid)), gun = best }
 end
 
 -- a character's position, asked part by part. PrimaryPart and Humanoid.RootPart
@@ -1415,74 +1398,45 @@ end
 -- and once the enemy is past their checks only the revolver is left. when
 -- nothing reaches, the longest range is the fallback rather than the whole
 -- cycle, so the macro does not shuffle through shotguns it cannot hit with
-local gmWasIn = {}
-
 local function gmDistFilter(slots)
-    if not cfg("gm_dist_on") then
-        gmWasIn = {}
-        return slots
-    end
+    -- off: the whole ticked list, so the macro is a plain cycle of every gun in
+    -- the macro card whatever the weapon checks say
+    if not cfg("gm_dist_on") then return slots end
     local d = gmNearestDist()
-    if not d then
-        -- nobody under the crosshair: no gun change this pass. handing back
-        -- every ticked gun here kept the revolver in the cycle while you were
-        -- aiming at nothing, which is what made it switch on its own
-        gmWasIn = {}
-        return {}
-    end
-    -- the db and tac weapon checks are the close range pair, so the moment the
-    -- enemy is past the longest of them the revolver takes over on its own. it
-    -- is picked by name here instead of by the reaching logic below, so a
-    -- revolver slider set shorter than that gap still comes out rather than the
-    -- macro sitting on a shotgun that cannot reach him
-    local close = 0
+    if not d then return slots end
+    -- up close: every close gun whose own check reaches the enemy spams with
+    -- the rest, so the double barrel and the tac keep alternating even when
+    -- their two sliders are set a few studs apart. the revolver is left out of
+    -- the close pair by name, which is the point of the distance toggle
+    local close = {}
     for _, s in ipairs(slots) do
         if s.gun.cfgid ~= "gm_rev" then
             local r = gmRange(s.gun)
-            if r ~= math.huge and r > close then close = r end
+            if d <= r then close[#close + 1] = s end
         end
     end
-    if close > 0 and d > close then
-        for _, s in ipairs(slots) do
-            if s.gun.cfgid == "gm_rev" then
-                gmWasIn = {}
-                return { s }
-            end
-        end
-    end
-    local reach = {}
-    local far = nil
-    local was = {}
+    if #close > 0 then return close end
+    -- past every close check: the longest check that still reaches is the gun
+    -- for that range, so the revolver comes out on its own. with nothing in
+    -- reach the longest check there is wins, so at distance the macro holds the
+    -- long gun instead of cycling shotguns it cannot hit with
+    local best = nil
     for _, s in ipairs(slots) do
         local r = gmRange(s.gun)
-        -- four studs of leeway on a range that reached on the last sample, so
-        -- standing on the db/tac line does not flicker between them and the rev
-        if d <= r or (gmWasIn[r] and d <= r + 4) then
-            reach[#reach + 1] = s
-            was[r] = true
-        elseif r < math.huge then
-            if not far or r > far then far = r end
-        end
+        if d <= r and (best == nil or r > best) then best = r end
     end
-    gmWasIn = was
-    local out = {}
-    if #reach == 0 then
-        if not far then return slots end
+    if best == nil then
         for _, s in ipairs(slots) do
-            if gmRange(s.gun) == far then out[#out + 1] = s end
+            local r = gmRange(s.gun)
+            if r < math.huge and (best == nil or r > best) then best = r end
         end
-        if #out == 0 then return slots end
-        return out
     end
-    local maxR = 0
-    for _, s in ipairs(reach) do
-        local r = gmRange(s.gun)
-        if r > maxR then maxR = r end
+    if best == nil then return slots end
+    local out = {}
+    for _, s in ipairs(slots) do
+        if gmRange(s.gun) == best then out[#out + 1] = s end
     end
-    for _, s in ipairs(reach) do
-        if gmRange(s.gun) < maxR then out[#out + 1] = s end
-    end
-    if #out == 0 then return reach end
+    if #out == 0 then return slots end
     return out
 end
 
@@ -1787,105 +1741,16 @@ local function gmOnGun(g)
     end
     return false
 end
-
--- build the tier the macro acts on. this walks the backpack, reads every gun's
--- ammo and range and takes the distance, so it is done a few times a second at
--- most instead of on every step: at a 60ms swap delay the old code rebuilt all
--- of it sixteen times a second and the garbage that made was the stutter while
--- the activation key was held down
-local gmTierAt, gmTierSlots, gmTierD, gmPressAt, gmPressGun = 0, nil, nil, 0, nil
-local gmTierKey = nil
-
-local function gmTier(now)
-    if gmTierSlots and now - gmTierAt < 0.12 then
-        return gmTierSlots, gmTierD
-    end
-    gmTierAt = now
-    local ammoOn = cfg("gm_ammo") and true or false
-    -- one backpack walk for the whole tier, shared by every gun in it
-    local pool = gmPool()
-    local all = gmSlots(ammoOn and pool or {}, ammoOn)
-    local slots = gmDistFilter(all)
-    -- nothing ticked reaches the enemy but a gun's own check does: that gun is
-    -- the one the distance settings point at, so it is taken out even when it is
-    -- not ticked in the macro list
-    local dNow = gmNearestDist()
-    if dNow and #slots > 0 then
-        -- a gun whose weapon check is unticked has no limit, so it already
-        -- covers everything and nothing above it can be further
-        local maxTick, anyHuge = 0, false
-        for _, s in ipairs(slots) do
-            local r = gmRange(s.gun)
-            if r == math.huge then
-                anyHuge = true
-            elseif r > maxTick then
-                maxTick = r
-            end
-        end
-        if not anyHuge and dNow > maxTick then
-            local farSlot = gmFarGun(maxTick)
-            if farSlot then
-                farSlot.dry = gmGunEmpty(farSlot.gun, pool, ammoOn) and true or false
-                slots = { farSlot }
-            end
-        end
-    end
-    -- dry guns drop out inside the tier, unless the whole tier reads empty: an
-    -- empty revolver that reaches the enemy is still the right gun to hold, and
-    -- it reloads on its own, where a shotgun that cannot reach never will
-    local wet = {}
-    for _, s in ipairs(slots) do
-        if not s.dry then wet[#wet + 1] = s end
-    end
-    if #wet > 0 then
-        slots = wet
-    elseif #slots > 0 then
-        -- the whole tier is empty: both shotguns just ran dry up close, so hand
-        -- over to the gun with the longest weapon check instead of cycling two
-        -- empty ones. that is the revolver, it comes out even with its box in the
-        -- macro list empty, and it reloads while it is out
-        local farSlot = gmFarGun(0)
-        if farSlot then
-            farSlot.dry = gmGunEmpty(farSlot.gun, pool, ammoOn) and true or false
-            slots = { farSlot }
-        end
-    end
-    -- a new tier is acted on at once instead of on the next swap tick. the swap
-    -- delay is the rhythm of the close range spam, not a wait to be served before
-    -- the revolver can come out: the enemy crossing out of the shotgun checks is
-    -- a needed swap, so it goes through on the next frame
-    local tierKey = slots[1] and slots[1].gun.cfgid or nil
-    if tierKey ~= gmTierKey then
-        gmTierKey = tierKey
-        gmNext = 0
-    end
-    gmTierSlots, gmTierD = slots, dNow
-    return slots, dNow
-end
-
 -- press the next ticked gun's hotbar key and hold it until the next swap
-local gmDistDbgAt = 0
-
 local function gmStepKeys(now)
-    local slots, dNow = gmTier(now)
-    -- TEMP: one line a second with the distance the macro acts on, the gun it
-    -- thinks is in hand and the tier it picked, so this can be checked against
-    -- the game. delete this block and gmDistDbgAt to remove it
-    if now - gmDistDbgAt >= 1 then
-        gmDistDbgAt = now
-        local names = {}
-        for _, s in ipairs(slots) do
-            local r = gmRange(s.gun)
-            names[#names + 1] = tostring(s.slot) .. ":" .. (s.dry and "dry" or (r == math.huge and "inf" or tostring(math.floor(r))))
-        end
-        warn(string.format("[gun] d=%s hand=%s tier=%s", dNow and string.format("%.0f", dNow) or "nil", tostring(heldToolName()), table.concat(names, " ")))
-    end
+    local ammoOn = cfg("gm_ammo") and true or false
+    local slots = gmDistFilter(gmSlots(ammoOn and gmPool() or {}, ammoOn))
     local n = #slots
     if n == 0 then
         -- nothing has ammo: leave whatever is in hand alone. releasing the
         -- hotbar key does not unequip a tool
         gmRelease()
-        gmPin, gmCheckAt, gmPressGun = nil, 0, nil
+        gmPin, gmCheckAt = nil, 0
         return
     end
     if n == 1 then
@@ -1914,35 +1779,14 @@ local function gmStepKeys(now)
         return
     end
     gmPin = nil
-    -- the last swap has not landed yet: the game has not put that gun in hand.
-    -- pressing again now only queues tool changes the game cannot keep up with,
-    -- and that backlog is what made the frame stutter while the key was held.
-    -- wait for it to land, with a timeout in case the press was swallowed
-    if gmPressGun and not gmOnGun(gmPressGun) and now - gmPressAt < 0.35 then return end
-    local nextIdx = (gmIdx % n) + 1
-    local nextSlot = slots[nextIdx]
-    local vk = 0x30 + nextSlot.slot
-    -- the gun this step wants is already in hand: pressing its own hotkey again
-    -- only makes the game re-equip it, so park on it and let the next step move
-    -- on to the other gun
-    if gmOnGun(nextSlot.gun) then
-        gmIdx = nextIdx
-        return
-    end
-    -- floor between presses: a 10ms swap delay used to fire a hundred key events
-    -- and a hundred weapon swaps a second, which is where the stutter came from.
-    -- this still alternates the two shotguns many times a second
-    if now - gmPressAt < 0.05 then return end
-    gmIdx = nextIdx
-    -- one key event per swap and nothing left held down: keypress already sends
-    -- down and up, so the release in front of it was a second injection into the
-    -- game for every single swap
-    if gmHeldVk then gmRelease() end
-    if pcall(keypress, vk) then
-        -- this gun is the one the next step waits for, in case the press is
-        -- swallowed before the game puts it in hand
-        gmPressGun, gmPressAt = nextSlot.gun, now
-    end
+    -- straight cycle: press the next ticked gun's hotkey on every step and let
+    -- the game keep up. nothing waits for the last swap to land, so a press the
+    -- game swallows is simply followed by the next one in the cycle, and the
+    -- swap delay is the only thing pacing the spam
+    gmIdx = (gmIdx % n) + 1
+    local vk = 0x30 + slots[gmIdx].slot
+    gmRelease()
+    if pcall(keypress, vk) then gmHeldVk = vk end
 end
 
 -- direct equip, for games that let a script move the tool itself
@@ -1976,14 +1820,14 @@ end
 local function gmStep()
     if not gmActive() then
         gmRelease()
-        -- drop the cached tier so the next hold reads the game fresh
-        gmTierSlots, gmPressGun = nil, nil
+        -- the next hold reads the game fresh and swaps on its first step
+        gmNext = 0
         return
     end
     local now = tick()
     if now < gmNext then return end
     local delay = (tonumber(cfg("gm_delay")) or 60) / 1000
-    gmNext = now + math.max(delay, 0.02)
+    gmNext = now + math.max(delay, 0.01)
     if cfg("gm_method") == "equip" then
         gmStepEquip()
     else
