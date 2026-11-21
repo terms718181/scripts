@@ -1,0 +1,2985 @@
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+pcall(setrobloxinput, true)
+
+local MOUSE_Y_OFFSET = 0 -- shots landing ~58px above cursor? set 58
+
+local CFG = {
+    tb_enabled = true,
+    tb_key = 0x06,
+    tb_kbmode = "hold",
+
+    tb_visualize = false,
+    tb_hitbox_x = 1.0,
+    tb_hitbox_y = 2.0,
+    tb_maxdist = 0,
+
+    tb_sticky = false,
+    tb_selkey = 0,
+    tb_unselkey = 0,
+    tb_selvis = true,
+
+    esp_box = true,
+    esp_name = true,
+    esp_skel = false,
+    esp_hp = true,
+    esp_shield = true,
+    esp_dist = 1000,
+
+    tb_pred = false,
+    tb_dist_pred = false,
+    tb_close_dist = 20,
+    tb_mid_dist = 50,
+    tb_close_x = 0.15,
+    tb_close_y = 0.15,
+    tb_mid_x = 0.15,
+    tb_mid_y = 0.15,
+    tb_far_x = 0.15,
+    tb_far_y = 0.15,
+    tb_pred_x = 0.15,
+    tb_pred_y = 0.15,
+    tb_pred_smooth = 0.4,
+
+    tb_humanize = false,
+    tb_delay_min = 30,
+    tb_delay_max = 120,
+    tb_int_min = 80,
+    tb_int_max = 160,
+    tb_hold_min = 15,
+    tb_hold_max = 55,
+    tb_hes_chance = 10,
+    tb_hes_min = 150,
+    tb_hes_max = 450,
+    tb_fatigue = 8,
+
+    tb_knock = true, -- skip knocked (K.O) players
+
+    tb_wepcheck = false,
+    tb_rev_on = true, tb_rev_dist = 300,
+    tb_db_on = true, tb_db_dist = 120,
+    tb_tac_on = true, tb_tac_dist = 150,
+
+    gm_on = false,
+    gm_key = 0x46,
+    gm_mode = "toggle",
+    gm_delay = 60,
+    gm_method = "keys",
+    gm_link = false,
+    gm_link_ms = 0,
+    gm_ammo = true,
+    gm_dist_on = false, -- only spam guns whose own range reaches the nearest enemy
+    gm_drop = false,
+    gm_rev = true,
+    gm_db = true,
+    gm_tac = true,
+    gm_rev_slot = 1,
+    gm_db_slot = 2,
+    gm_tac_slot = 3,
+}
+
+local function v(id)
+    return CFG[id]
+end
+
+local SNAP_KEYS = {}
+for k in pairs(CFG) do SNAP_KEYS[#SNAP_KEYS + 1] = k end
+
+local cfgSnap, cfgSnapAt = nil, 0
+local CFG_SNAP_TTL = 0.2
+
+local function cfg(id)
+    local now = tick()
+    if not cfgSnap or now - cfgSnapAt > CFG_SNAP_TTL then
+        cfgSnap = {}
+        for _, k in ipairs(SNAP_KEYS) do cfgSnap[k] = v(k) end
+        cfgSnapAt = now
+    end
+    return cfgSnap[id]
+end
+
+local UIS = nil
+pcall(function() UIS = game:GetService("UserInputService") end)
+
+local MOUSE_FN = {
+    [0x01] = ismouse1pressed,
+    [0x02] = ismouse2pressed,
+    [0x04] = ismouse3pressed,
+    [0x05] = ismouse4pressed,
+    [0x06] = ismouse5pressed,
+}
+local function vkHeld(vk)
+    local fn = MOUSE_FN[vk]
+    if fn then
+        local ok, r = pcall(fn)
+        if ok then return r == true end
+    end
+    -- side buttons are also plain VK codes, so ask the keyboard check too
+    local ok, r = pcall(iskeypressed, vk)
+    if ok and r == true then return true end
+    if UIS and UIS.IsKeyDown then
+        local okd, down = pcall(function() return UIS:IsKeyDown(vk) end)
+        if okd then return down == true end
+    end
+    return false
+end
+
+local kbOn, kbPrev = false, false
+local function keyActive()
+    local mode = CFG.tb_kbmode
+    if mode == "always" then return true end
+    local held = vkHeld(CFG.tb_key)
+    if mode == "toggle" then
+        if held and not kbPrev then kbOn = not kbOn end
+        kbPrev = held
+        return kbOn
+    end
+    return held
+end
+
+local function windowActive()
+    local ok, r = pcall(isrbxactive)
+    if ok then return r == true end
+    return true
+end
+
+local function dist2(ax, ay, bx, by)
+    local dx, dy = ax - bx, ay - by
+    return math.sqrt(dx * dx + dy * dy)
+end
+
+local function dist3(a, b)
+    local dx, dy, dz = a.X - b.X, a.Y - b.Y, a.Z - b.Z
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+local SELECTED, SELVIS = {}, {}
+local prevSelKey, prevUnselKey = false, false
+
+-- instance userdata gets rewrapped between frames, key on Address
+local function selKey(t)
+    local ok, a = pcall(function() return t.character.Address end)
+    return ok and a or t.character
+end
+
+local function addSel(t)
+    if t and t.character then SELECTED[selKey(t)] = t end
+end
+
+local function remSel(t)
+    local k = t and t.character and selKey(t)
+    if not k then return end
+    local sv = SELVIS[k]
+    SELECTED[k], SELVIS[k] = nil, nil
+    if sv then
+        pcall(function() sv.box:Remove() end)
+        pcall(function() sv.txt:Remove() end)
+    end
+end
+
+local function selOk(t)
+    return not cfg("tb_sticky") or SELECTED[selKey(t)] ~= nil
+end
+
+-- reuse the stored target's rootName when resolving a selection's root
+local function selRoot(ch, t)
+    local h = t and t.hrp
+    if h then
+        local ok, alive = pcall(function() return h.Parent ~= nil end)
+        if ok and alive then return h end
+    end
+    h = ch:FindFirstChild(t and t.rootName or "HumanoidRootPart")
+    if t then t.hrp = h end
+    return h
+end
+
+local function pruneSel()
+    -- safety: storing/removing keys mid-iteration raises
+    -- "invalid key to 'next'" and kills the loop; collect the
+    -- changes from this pass and apply them after pairs() ends
+    local pending = {}
+    for k, t in pairs(SELECTED) do
+        local ok, alive = pcall(function() return t.character.Parent ~= nil end)
+        if ok and alive then
+            -- still up
+        elseif t.player then
+            -- player-linked picks stay through death, wait for respawn...
+            -- unless the player left the game entirely; nobody respawns then
+            -- and the pick (plus its visuals) would sit frozen forever
+            local okGone, gone = pcall(function() return t.player.Parent == nil end)
+            if okGone and gone then
+                pending[#pending + 1] = { key = k, drop = true, t = t }
+            else
+                local okC, nc = pcall(function() return t.player.Character end)
+                if okC and nc then
+                    local okP, par = pcall(function() return nc.Parent end)
+                    if okP and par then
+                        t.character = nc
+                        t.hrp = nil
+                        pending[#pending + 1] = { key = k, move = selKey(t), t = t }
+                    end
+                end
+            end
+        else
+            pending[#pending + 1] = { key = k, drop = true, t = t }
+        end
+    end
+    for _, p in ipairs(pending) do
+        if p.drop then
+            remSel(p.t)
+        else
+            local sv = SELVIS[p.key]
+            SELECTED[p.key], SELVIS[p.key] = nil, nil
+            SELECTED[p.move] = p.t
+            if sv then SELVIS[p.key] = nil; SELVIS[p.move] = sv end
+        end
+    end
+end
+
+local LOCKED, TRACK_CHAR, TRACK_POS = nil, nil, nil
+local TRACK_T = 0
+local TRACKED_VEL = Vector3.new(0, 0, 0)
+
+_G.StellarTriggerbot = _G.StellarTriggerbot or {}
+_G.StellarTriggerbot.LockedTarget = nil
+_G.StellarTriggerbot.TargetPosition = nil
+
+-- engagement state
+local insideSince, entryDelay = nil, 0
+local lastClick, nextClickIn = 0, 0
+local lastFireAt = 0 -- last moment the trigger actually fired, read by the gun macro
+local tbEngaged = false -- true while a target is under the crosshair and the trigger is live
+local pendingRelease, shotCount = 0, 0
+local pauseUntil, stickyUntil = 0, 0
+local wallBlocked, wallCheckAt = false, 0
+
+local function resetEngagement()
+    insideSince = nil
+    shotCount = 0
+    pauseUntil = 0
+    nextClickIn = 0
+    wallBlocked = false
+    stickyUntil = 0
+end
+
+local function resetLock()
+    LOCKED = nil
+    TRACK_CHAR = nil
+    TRACK_POS = nil
+    TRACKED_VEL = Vector3.new(0, 0, 0)
+    resetEngagement()
+    _G.StellarTriggerbot.LockedTarget = nil
+end
+
+local function localPlayer()
+    return Players.LocalPlayer
+end
+
+local function cursorPos()
+    local lp = localPlayer()
+    if lp then
+        local ok, m = pcall(function() return lp:GetMouse() end)
+        if ok and m and m.X and m.Y then
+            return m.X, m.Y - MOUSE_Y_OFFSET
+        end
+    end
+    local cam = Workspace.CurrentCamera
+    if cam and cam.ViewportSize then
+        return cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2
+    end
+    return 0, 0
+end
+
+local function localRootPos()
+    local lp = localPlayer()
+    local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+    return hrp and hrp.Position or Vector3.new(0, 0, 0)
+end
+
+local function randRange(a, b)
+    a, b = tonumber(a) or 0, tonumber(b) or 0
+    if b < a then a, b = b, a end
+    return a + math.random() * (b - a)
+end
+
+local function cross2d(o, a, b)
+    return (a.X - o.X) * (b.Y - o.Y) - (a.Y - o.Y) * (b.X - o.X)
+end
+
+local function convexHull(pts)
+    table.sort(pts, function(a, b)
+        return a.X < b.X or (a.X == b.X and a.Y < b.Y)
+    end)
+    if #pts < 3 then
+        return pts
+    end
+    local lower, upper = {}, {}
+    for i = 1, #pts do
+        while #lower >= 2 and cross2d(lower[#lower - 1], lower[#lower], pts[i]) <= 0 do
+            table.remove(lower)
+        end
+        lower[#lower + 1] = pts[i]
+    end
+    for i = #pts, 1, -1 do
+        while #upper >= 2 and cross2d(upper[#upper - 1], upper[#upper], pts[i]) <= 0 do
+            table.remove(upper)
+        end
+        upper[#upper + 1] = pts[i]
+    end
+    table.remove(lower)
+    table.remove(upper)
+    for _, p in ipairs(upper) do
+        lower[#lower + 1] = p
+    end
+    return lower
+end
+
+local function pointInPolygon(poly, px, py)
+    local inside = false
+    local j = #poly
+    for i = 1, #poly do
+        local xi, yi = poly[i].X, poly[i].Y
+        local xj, yj = poly[j].X, poly[j].Y
+        if (yi > py) ~= (yj > py) and px < (xj - xi) * (py - yi) / (yj - yi) + xi then
+            inside = not inside
+        end
+        j = i
+    end
+    return inside
+end
+
+local function distToSeg(px, py, ax, ay, bx, by)
+    local dx, dy = bx - ax, by - ay
+    local len2 = dx * dx + dy * dy
+    local t = len2 > 0 and math.max(0, math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) or 0
+    local ex, ey = px - (ax + t * dx), py - (ay + t * dy)
+    return math.sqrt(ex * ex + ey * ey)
+end
+
+local function nearPolygonEdge(poly, px, py, margin)
+    local j = #poly
+    for i = 1, #poly do
+        if distToSeg(px, py, poly[j].X, poly[j].Y, poly[i].X, poly[i].Y) <= margin then
+            return true
+        end
+        j = i
+    end
+    return false
+end
+
+-- 8 corners of the world-space hitbox
+local function getCorners(pos, size)
+    local c, idx = {}, 1
+    for xi = -1, 1, 2 do
+        for yi = -1, 1, 2 do
+            for zi = -1, 1, 2 do
+                c[idx] = Vector3.new(pos.X + size.X * xi, pos.Y + size.Y * yi, pos.Z + size.Z * zi)
+                idx = idx + 1
+            end
+        end
+    end
+    return c
+end
+
+local EDGES = {
+    { 1, 2 }, { 3, 4 }, { 5, 6 }, { 7, 8 },
+    { 1, 3 }, { 2, 4 }, { 5, 7 }, { 6, 8 },
+    { 1, 5 }, { 2, 6 }, { 3, 7 }, { 4, 8 },
+}
+
+local function rootOf(t)
+    local h = t.hrp
+    if h then
+        local ok, alive = pcall(function() return h.Parent ~= nil end)
+        if ok and alive then return h end
+    end
+    h = t.character and t.character:FindFirstChild(t.rootName or "HumanoidRootPart")
+    t.hrp = h
+    return h
+end
+
+local knifeAt, knifeCached = 0, false
+
+local function knifeOut()
+    local now = tick()
+    if now - knifeAt > 0.2 then
+        knifeAt = now
+        local lp = localPlayer()
+        local char = lp and lp.Character
+        knifeCached = char ~= nil and char:FindFirstChild("[Knife]") ~= nil
+    end
+    return knifeCached
+end
+
+-- knock check: characters in ZHD (place 138014591158268) carry a
+-- BodyEffects folder with a BoolValue named "K.O" that is true for as long
+-- as the player is knocked on the floor. The check stays generic: no folder
+-- or failed read = not knocked, so it is drop-in portable to Da Hood /
+-- other hood clones, and harmless in games without the flag.
+local function isKnocked(ch)
+    if not ch then return false end
+    local ok, be = pcall(function() return ch:FindFirstChild("BodyEffects") end)
+    if not ok or not be then return false end
+    local ok2, ko = pcall(function() return be:FindFirstChild("K.O") end)
+    if not ok2 or not ko then return false end
+    local ok3, v2 = pcall(function() return ko.Value end)
+    return ok3 and v2 == true
+end
+
+-- distance cap for whichever weapon is currently held
+local function heldToolName()
+    local lp = localPlayer()
+    local char = lp and lp.Character
+    local ok, name = pcall(function()
+        for _, d in ipairs(char:GetChildren()) do
+            -- IsA lies on this executor, compare ClassName directly
+            if d.ClassName == "Tool" then return d.Name end
+        end
+    end)
+    return ok and name or nil
+end
+
+local function wepCap()
+    local base = cfg("tb_maxdist") or 0
+    if not cfg("tb_wepcheck") then return base end
+    local n = heldToolName()
+    if not n then return base end
+    local low = n:lower()
+    local cap
+    if low:find("revolver", 1, true) then
+        if cfg("tb_rev_on") then cap = cfg("tb_rev_dist") end
+    elseif low:find("double", 1, true) and low:find("barrel", 1, true) then
+        if cfg("tb_db_on") then cap = cfg("tb_db_dist") end
+    elseif low:find("tac", 1, true) and low:find("shotgun", 1, true) then
+        if cfg("tb_tac_on") then cap = cfg("tb_tac_dist") end
+    end
+    if not cap then return base end
+    if base <= 0 then return cap end
+    return math.min(base, cap)
+end
+
+local camLens, camLensAt = nil, 0
+
+local function lensInfo()
+    local now = tick()
+    if not camLens or now - camLensAt > 0.5 then
+        local ok, s = pcall(function()
+            local cam = Workspace.CurrentCamera
+            return { vp = cam.ViewportSize, fov = cam.FieldOfView or 70 }
+        end)
+        if ok and s then
+            camLens, camLensAt = s, now
+        end
+    end
+    return camLens
+end
+
+local function makeTarget(character, player, rootName)
+    return {
+        character = character,
+        player = player,
+        rootName = rootName,
+        hrp = character and character:FindFirstChild(rootName or "HumanoidRootPart"),
+    }
+end
+
+local targetCache, targetCacheAt = nil, 0
+local TARGET_CACHE_TTL = 0.2
+
+local function invalidateTargets()
+    targetCache = nil
+end
+
+local function buildTargets()
+    local out = {}
+    local lp = localPlayer()
+    local placeId = game.PlaceId
+
+    if placeId == 3233893879 then
+        local chars = Workspace:FindFirstChild("Characters")
+        if chars then
+            for _, model in ipairs(chars:GetChildren()) do
+                if model:IsA("Model") and model:FindFirstChild("Root") then
+                    out[#out + 1] = makeTarget(model, nil, "Root")
+                end
+            end
+        end
+    elseif placeId == 292439477 then
+        local playersFolder = Workspace:FindFirstChild("Players")
+        if playersFolder then
+            for _, team in ipairs(playersFolder:GetChildren()) do
+                for _, model in ipairs(team:GetChildren()) do
+                    if model:IsA("Model") then
+                        local rootName = nil
+                        for _, part in ipairs(model:GetChildren()) do
+                            if (part:IsA("Part") or part:IsA("MeshPart")) and part.Size then
+                                local s = part.Size
+                                if math.abs(s.X - 2) < 0.1 and math.abs(s.Y - 2) < 0.1 and math.abs(s.Z - 1) < 0.1 then
+                                    rootName = part.Name
+                                end
+                            end
+                        end
+                        if rootName then
+                            out[#out + 1] = makeTarget(model, nil, rootName)
+                        end
+                    end
+                end
+            end
+        end
+    else
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= lp and plr.Character then
+                out[#out + 1] = makeTarget(plr.Character, plr, "HumanoidRootPart")
+            end
+        end
+    end
+
+    local folder = Workspace:FindFirstChild("Bot") or Workspace:FindFirstChild("Bots")
+    if folder then
+        for _, inst in ipairs(folder:GetChildren()) do
+            local model = inst
+            if not inst:IsA("Model") then
+                model = inst:FindFirstChild("Model")
+                if not model then
+                    for _, child in ipairs(inst:GetChildren()) do
+                        if child:IsA("Model") then
+                            model = child
+                            break
+                        end
+                    end
+                end
+                if not model then
+                    model = inst
+                end
+            end
+            if model:FindFirstChild("HumanoidRootPart") and model:FindFirstChild("Head") then
+                out[#out + 1] = makeTarget(model, nil, "HumanoidRootPart")
+            end
+        end
+    end
+
+    return out
+end
+
+local function collectTargets()
+    local now = tick()
+    if not targetCache or now - targetCacheAt > TARGET_CACHE_TTL then
+        targetCache = buildTargets()
+        targetCacheAt = now
+    end
+    return targetCache
+end
+
+pcall(function()
+    Players.PlayerAdded:Connect(invalidateTargets)
+    Players.PlayerRemoving:Connect(invalidateTargets)
+    Workspace.ChildAdded:Connect(function(c)
+        if c.Name == "Characters" or c.Name == "Players" or c.Name == "Bot" or c.Name == "Bots" then
+            invalidateTargets()
+        end
+    end)
+    Workspace.ChildRemoved:Connect(function(c)
+        if c.Name == "Characters" or c.Name == "Players" or c.Name == "Bot" or c.Name == "Bots" then
+            invalidateTargets()
+        end
+    end)
+end)
+
+-- nearest selected target to the cursor
+local function closestSelected(cx, cy)
+    local best, bestDist = nil, 9e9
+    for _, t in ipairs(collectTargets()) do
+        local hrp = SELECTED[selKey(t)] and rootOf(t)
+        if hrp then
+            local ok, pos = pcall(function() return hrp.Position end)
+            if ok and pos then
+                local sp, onScreen = WorldToScreen(pos)
+                if onScreen then
+                    local d = dist2(sp.X, sp.Y, cx, cy)
+                    if d < bestDist then best, bestDist = t, d end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function findClosest(cx, cy, localPos, ignoreSel)
+    local best, bestDist = nil, 9e9
+    local maxd = wepCap()
+    for _, t in ipairs(collectTargets()) do
+        local hrp = t.hrp
+        if hrp then
+            local okPos, pos = pcall(function() return hrp.Position end)
+            if okPos and pos and (pos.X ~= 0 or pos.Y ~= 0 or pos.Z ~= 0) and pos ~= localPos
+                and (maxd <= 0 or dist3(localPos, pos) <= maxd)
+                and (ignoreSel or selOk(t)) then
+                local sp, onScreen = WorldToScreen(pos)
+                if onScreen then
+                    local d = dist2(sp.X, sp.Y, cx, cy)
+                    if d < bestDist then
+                        best, bestDist = t, d
+                    end
+                end
+            end
+        end
+    end
+    return best, bestDist
+end
+
+local function validTarget(t)
+    if not t or not t.character or not t.character.Parent then return false end
+    if not rootOf(t) then return false end
+    if cfg("tb_knock") and isKnocked(t.character) then return false end
+    local okFf, ff = pcall(function()
+        return t.character:FindFirstChildOfClass("ForceField")
+    end)
+    return not (okFf and ff)
+end
+
+local cubeLines = nil
+
+local function ensureDrawings()
+    if cubeLines then return end
+    cubeLines = {}
+    for i = 1, 12 do
+        local l = Drawing.new("Line")
+        l.Thickness = 1
+        l.Color = Color3.fromRGB(199, 171, 197)
+        l.Visible = false
+        cubeLines[i] = l
+    end
+end
+
+local function drawCube(verts2d)
+    ensureDrawings()
+    for i = 1, 12 do
+        local e = EDGES[i]
+        cubeLines[i].From = verts2d[e[1]]
+        cubeLines[i].To = verts2d[e[2]]
+        cubeLines[i].Visible = true
+    end
+end
+
+local function hideCube()
+    if cubeLines then
+        for i = 1, 12 do
+            cubeLines[i].Visible = false
+        end
+    end
+end
+
+-- walk the ray past glass/nc parts, give up after 8 hops
+local function wallBetween(pos, targetChar)
+    local lp = localPlayer()
+    local lpChar = lp and lp.Character
+    local cam = Workspace.CurrentCamera
+    local origin = (cam and cam.Position) or localRootPos()
+
+    for _ = 1, 8 do
+        local dir = pos - origin
+        if dir.Magnitude < 0.05 then return false end
+        local ok, res = pcall(function()
+            return Workspace:Raycast(origin, dir)
+        end)
+        if not ok or res == nil or res.Instance == nil then return false end
+        local inst = res.Instance
+        if inst:IsDescendantOf(targetChar) then return false end
+        local skip = (lpChar and inst:IsDescendantOf(lpChar))
+            or inst.CanCollide == false
+            or (inst.Transparency or 0) > 0.9
+        if not skip then return true end
+        if res.Position == nil then return false end
+        origin = res.Position + dir.Unit * 0.15
+    end
+    return false
+end
+
+local function fireGun(now)
+    local hold = randRange(cfg("tb_hold_min"), cfg("tb_hold_max")) / 1000
+    if hold > 0.002 and pcall(mouse1press) then
+        pendingRelease = now + hold
+        return
+    end
+    pcall(mouse1click)
+end
+
+local lastErr = nil
+
+local function step()
+    local now = tick()
+    tbEngaged = false
+
+    if pendingRelease > 0 and now >= pendingRelease then
+        pcall(mouse1release)
+        pendingRelease = 0
+    end
+
+    if not cfg("tb_enabled") or not windowActive() then
+        resetLock()
+        hideCube()
+        return
+    end
+
+    local cx, cy = cursorPos()
+
+    pruneSel()
+
+    local localPos = localRootPos()
+    local closest0 = findClosest(cx, cy, localPos, true)
+    local selH = CFG.tb_selkey ~= 0 and vkHeld(CFG.tb_selkey)
+    local unselH = CFG.tb_unselkey ~= 0 and vkHeld(CFG.tb_unselkey)
+    if selH and not prevSelKey and closest0 then
+        if SELECTED[selKey(closest0)] then remSel(closest0) else addSel(closest0) end
+    end
+    if unselH and not prevUnselKey then
+        local st = closestSelected(cx, cy)
+        if st then remSel(st) end
+    end
+    prevSelKey, prevUnselKey = selH, unselH
+
+    if knifeOut() then
+        return
+    end
+
+    if not keyActive() then
+        resetLock()
+        hideCube()
+        return
+    end
+
+    local target = LOCKED
+    local closest, closestDist = findClosest(cx, cy, localPos)
+
+    if not LOCKED then
+        target = closest
+    elseif closest and closest.character ~= LOCKED.character then
+        local lhrp = rootOf(LOCKED)
+        local lockedDist = 9e9
+        if lhrp then
+            local lsp, lon = WorldToScreen(lhrp.Position)
+            if lon then
+                lockedDist = dist2(lsp.X, lsp.Y, cx, cy)
+            end
+        end
+        if closestDist + 8 < lockedDist then
+            target = closest
+        end
+    end
+
+    if not validTarget(target) or not selOk(target) then
+        resetLock()
+        hideCube()
+        return
+    end
+
+    LOCKED = target
+    _G.StellarTriggerbot.LockedTarget = target.character
+
+    local hrp = rootOf(target)
+    local pos = hrp.Position
+
+    local maxd = wepCap()
+    if (pos.X == 0 and pos.Y == 0 and pos.Z == 0) or pos == localPos
+        or (maxd > 0 and dist3(localPos, pos) > maxd) then
+        resetLock()
+        hideCube()
+        return
+    end
+
+    if TRACK_CHAR ~= target.character then
+        TRACK_CHAR = target.character
+        TRACKED_VEL = Vector3.new(0, 0, 0)
+        resetEngagement()
+    else
+        local dt = now - TRACK_T
+        if dt > 0 then
+            local sm = math.min(math.max(cfg("tb_pred_smooth") or 0.4, 0), 0.95)
+            local iv = (pos - TRACK_POS) / dt
+            TRACKED_VEL = TRACKED_VEL + (iv - TRACKED_VEL) * (1 - sm)
+        end
+    end
+    TRACK_POS = pos
+    TRACK_T = now
+
+    if cfg("tb_pred") then
+        local vel = TRACKED_VEL
+
+        local px, py = cfg("tb_pred_x"), cfg("tb_pred_y")
+
+        if cfg("tb_dist_pred") then
+            local d = dist3(localPos, pos)
+            if d <= cfg("tb_close_dist") then
+                px, py = cfg("tb_close_x"), cfg("tb_close_y")
+            elseif d <= cfg("tb_mid_dist") then
+                px, py = cfg("tb_mid_x"), cfg("tb_mid_y")
+            else
+                px, py = cfg("tb_far_x"), cfg("tb_far_y")
+            end
+        end
+
+        pos = pos + vel * Vector3.new(px, py, px)
+    end
+
+    _G.StellarTriggerbot.TargetPosition = pos
+
+    local sp, onScreen = WorldToScreen(pos)
+    if not onScreen then
+        resetEngagement()
+        hideCube()
+        return
+    end
+
+    local hx, hy = cfg("tb_hitbox_x"), cfg("tb_hitbox_y")
+    local inside = false
+
+    if cfg("tb_visualize") then
+        local size = Vector3.new(hx, hy, hx)
+        local corners = getCorners(pos, size)
+
+        local verts2d = {}
+        local pts = {}
+        local allOnScreen = true
+        for i = 1, 8 do
+            local cp, os2 = WorldToScreen(corners[i])
+            verts2d[i] = cp
+            if os2 then
+                pts[#pts + 1] = cp
+            else
+                allOnScreen = false
+            end
+        end
+
+        if allOnScreen then
+            drawCube(verts2d)
+        else
+            hideCube()
+        end
+
+        if #pts >= 3 then
+            local hull = convexHull(pts)
+            inside = pointInPolygon(hull, cx, cy)
+                or nearPolygonEdge(hull, cx, cy, 12)
+        end
+    else
+        hideCube()
+
+        local cursorD = dist2(sp.X, sp.Y, cx, cy)
+        local test = true
+        local lens = lensInfo()
+        if lens then
+            local dist = dist3(Workspace.CurrentCamera.Position, pos)
+            local pxPerStud = (lens.vp.Y * 0.5)
+                / math.tan(math.rad(lens.fov) * 0.5)
+                / math.max(dist, 0.05)
+            test = cursorD
+                <= math.sqrt(hx * hx + hy * hy + hx * hx) * pxPerStud + 16
+        end
+
+        if test then
+            local spx = WorldToScreen(pos + Vector3.new(hx, 0, 0))
+            local spz = WorldToScreen(pos + Vector3.new(0, 0, hx))
+            local spy = WorldToScreen(pos + Vector3.new(0, hy, 0))
+            local hw = math.max(math.abs(spx.X - sp.X), math.abs(spz.X - sp.X))
+            local hh = math.abs(spy.Y - sp.Y)
+            inside = math.abs(cx - sp.X) <= hw + 12
+                and math.abs(cy - sp.Y) <= hh + 12
+        end
+    end
+
+    if inside then
+        stickyUntil = now + 0.12
+    elseif now < stickyUntil then
+        inside = true
+    end
+
+    if inside then
+        tbEngaged = true
+        local fire = true
+        local humOn = cfg("tb_humanize")
+
+        if now >= wallCheckAt then
+            wallCheckAt = now + 0.05
+            wallBlocked = wallBetween(pos, target.character)
+        end
+        if wallBlocked then
+            fire = false
+        end
+
+        if fire and humOn then
+            if not insideSince then
+                insideSince = now
+                shotCount = 0
+                entryDelay = randRange(cfg("tb_delay_min"), cfg("tb_delay_max")) / 1000
+            end
+            if now - insideSince < entryDelay
+                or now - lastClick < nextClickIn
+                or now < pauseUntil
+            then
+                fire = false
+            end
+        end
+
+        if fire then
+            if humOn then
+                fireGun(now)
+                shotCount = shotCount + 1
+                nextClickIn = (randRange(cfg("tb_int_min"), cfg("tb_int_max"))
+                    + math.min(shotCount, 20) * (tonumber(cfg("tb_fatigue")) or 0)) / 1000
+                if math.random() * 100 < (tonumber(cfg("tb_hes_chance")) or 0) then
+                    pauseUntil = now + randRange(cfg("tb_hes_min"), cfg("tb_hes_max")) / 1000
+                end
+            else
+                pcall(mouse1click)
+            end
+            lastClick = now
+            lastFireAt = now
+        end
+    else
+        resetEngagement()
+    end
+end
+
+-- =====================================================================
+-- gun macro: cycles the ticked guns so the draw animation is skipped and
+-- the fire cooldown resets, which reads as a much faster shot rate
+-- =====================================================================
+local GM_GUNS = {
+    { cfgid = "gm_rev", slotid = "gm_rev_slot", distid = "tb_rev_dist", useid = "tb_rev_on", test = function(low)
+        return low:find("revolver", 1, true) ~= nil
+    end },
+    { cfgid = "gm_db", slotid = "gm_db_slot", distid = "tb_db_dist", useid = "tb_db_on", test = function(low)
+        return low:find("double", 1, true) ~= nil and low:find("barrel", 1, true) ~= nil
+    end },
+    { cfgid = "gm_tac", slotid = "gm_tac_slot", distid = "tb_tac_dist", useid = "tb_tac_on", test = function(low)
+        return low == "tac"
+            or (low:find("tac", 1, true) ~= nil and low:find("shotgun", 1, true) ~= nil)
+    end },
+}
+
+local gmPrev, gmOn = false, false
+local gmNext, gmErr = 0, nil
+local gmHeldVk, gmIdx, gmCheckAt = nil, 0, 0
+local gmPin = nil
+
+local function gmActive()
+    if not cfg("gm_on") then return false end
+    if cfg("gm_link") then
+        -- linked: only while the trigger has a target under the crosshair.
+        -- a linger above 0 keeps the spam alive briefly after it disengages.
+        if tbEngaged then return true end
+        local linger = (tonumber(cfg("gm_link_ms")) or 0) / 1000
+        return linger > 0 and (tick() - lastFireAt) <= linger
+    end
+    local mode = cfg("gm_mode")
+    if mode == "always" then return true end
+    local key = cfg("gm_key")
+    local pressed = key ~= nil and vkHeld(key)
+    if mode == "toggle" then
+        if pressed and not gmPrev then gmOn = not gmOn end
+        gmPrev = pressed
+        return gmOn
+    end
+    return pressed
+end
+
+-- which guns are ticked, resolved once per pass. the old version asked cfg()
+-- for every gun for every child of every box, which ran to dozens of snapshot
+-- lookups per swap; the ticked set does not change inside one swap
+local function gmEnabled()
+    local out = {}
+    for _, g in ipairs(GM_GUNS) do
+        if cfg(g.cfgid) then out[#out + 1] = g end
+    end
+    return out
+end
+
+local function gmWanted(name, guns)
+    local low = tostring(name or ""):lower()
+    for _, g in ipairs(guns) do
+        if g.test(low) then return true end
+    end
+    return false
+end
+
+-- one walk per swap, shared by every gun, instead of one walk per gun
+local function gmCollect(box, out, guns)
+    if not box then return end
+    pcall(function()
+        for _, d in ipairs(box:GetChildren()) do
+            -- IsA lies on this executor, compare ClassName directly
+            if d.ClassName == "Tool" and gmWanted(d.Name, guns) then
+                out[#out + 1] = d
+            end
+        end
+    end)
+end
+
+-- backpack plus equipped, so a gun counts wherever it sits
+local function gmPool()
+    local lp = localPlayer()
+    local char = lp and lp.Character
+    if not char then return {}, nil end
+    local guns = gmEnabled()
+    local out = {}
+    if #guns > 0 then
+        gmCollect(char, out, guns)
+        local ok, pack = pcall(function() return lp:FindFirstChildOfClass("Backpack") end)
+        if ok then gmCollect(pack, out, guns) end
+    end
+    local hum
+    pcall(function() hum = char:FindFirstChildOfClass("Humanoid") end)
+    return out, hum
+end
+
+-- ammo: a gun reading as empty drops out of the cycle so the guns with
+-- ammo keep swapping. a gun with no readable ammo stays in, so an unknown
+-- source never blocks anything.
+local GM_AMMO_ATTRS = { "Ammo", "ammo", "AmmoCount", "AmmoLeft", "AmmoValue", "Clip", "ClipAmmo", "CurrentAmmo", "Mag", "Magazine", "Bullets", "Shots" }
+local GM_AMMO_KIDS = { ammo = true, ammocount = true, ammoleft = true, clip = true, clipammo = true, currentammo = true, mag = true, magazine = true, bullets = true, shots = true }
+local gmAmmoCache = {}
+
+local function gmNum(v)
+    if type(v) == "number" then return v end
+    if type(v) == "string" then
+        local n = v:match("%d+")
+        if n then return tonumber(n) end
+    end
+    return nil
+end
+
+-- the source that answered last time is remembered per tool, so a repeat ask
+-- is one property read instead of a GetDescendants walk over the whole tool.
+-- a tool with nothing readable is parked for 2s, so the walking path costs at
+-- most one walk per tool per 2s instead of one per cache tick
+local gmAmmoRef = setmetatable({}, { __mode = "k" })
+
+local function gmReadAmmo(tool, now)
+    local ref = gmAmmoRef[tool]
+    if ref then
+        if ref.none then
+            if now - ref.none < 2 then return nil end
+        else
+            local ok, raw
+            if ref.attr then
+                ok, raw = pcall(function() return tool:GetAttribute(ref.attr) end)
+            else
+                ok, raw = pcall(function() return ref.obj.Value end)
+            end
+            local n = ok and gmNum(raw) or nil
+            if n then return n end
+        end
+        gmAmmoRef[tool] = nil
+    end
+    for _, a in ipairs(GM_AMMO_ATTRS) do
+        local ok, raw = pcall(function() return tool:GetAttribute(a) end)
+        local n = ok and gmNum(raw) or nil
+        if n then
+            gmAmmoRef[tool] = { attr = a }
+            return n
+        end
+    end
+    local ok2, n2, obj = pcall(function()
+        for _, d in ipairs(tool:GetDescendants()) do
+            if GM_AMMO_KIDS[tostring(d.Name):lower()]
+                and tostring(d.ClassName):find("Value", 1, true) then
+                local num = gmNum(d.Value)
+                if num then return num, d end
+            end
+        end
+        return nil
+    end)
+    if ok2 and n2 ~= nil then
+        gmAmmoRef[tool] = obj and { obj = obj } or nil
+        return n2
+    end
+    gmAmmoRef[tool] = { none = now }
+    return nil
+end
+
+-- cached briefly, the cycle asks once per swap
+local function gmToolAmmo(tool)
+    local key = tostring(tool.Name)
+    local now = tick()
+    local hit = gmAmmoCache[key]
+    if hit and now - hit.t < 0.2 then return hit.n end
+    local n = gmReadAmmo(tool, now)
+    gmAmmoCache[key] = { t = now, n = n }
+    return n
+end
+
+local function gmToolEmpty(tool)
+    if not cfg("gm_ammo") then return false end
+    local n = gmToolAmmo(tool)
+    return n ~= nil and n <= 0
+end
+
+-- the gun's own tool, wherever it sits. the pool comes in as an argument:
+-- a fresh scan per gun per swap was the most expensive thing in this loop
+local function gmGunEmpty(g, pool, ammoOn)
+    if not ammoOn then return false end
+    for _, t in ipairs(pool) do
+        if g.test(tostring(t.Name):lower()) then return gmToolEmpty(t) end
+    end
+    return false
+end
+
+-- slots are the hotbar number keys the guns sit on. each entry keeps its gun
+-- so the hand can be compared against that exact gun, not just "some ticked gun"
+local function gmSlots(pool, ammoOn)
+    local out = {}
+    for _, g in ipairs(GM_GUNS) do
+        if cfg(g.cfgid) then
+            local slot = tonumber(cfg(g.slotid))
+            if slot and slot >= 1 and slot <= 9 and not gmGunEmpty(g, pool, ammoOn) then
+                out[#out + 1] = { slot = slot, gun = g }
+            end
+        end
+    end
+    return out
+end
+
+-- distance based: a gun only spams while the enemy is inside that gun's own
+-- weapon check in the weapons tab. of the guns that reach, the shortest range
+-- wins, so shotguns take over up close and the revolver is only pressed once
+-- they run dry (the ammo filter has already dropped the dry ones by then).
+-- guns set to the same range sit in one group and swap together
+local function gmRange(g)
+    -- unticked weapon check: no limit there, so this gun is the long range
+    -- fallback rather than one of the close range tiers
+    if g.useid and not cfg(g.useid) then return math.huge end
+    local r = tonumber(cfg(g.distid))
+    if not r or r <= 0 then return math.huge end
+    return r
+end
+
+-- a character's position, asked part by part. PrimaryPart and Humanoid.RootPart
+-- come back unusable on these rigs, and taking either first made the whole
+-- distance gate quietly switch itself off, so a candidate only counts once its
+-- Position actually reads back as a vector
+local function gmPartPos(part)
+    if not part then return nil end
+    local ok, pos = pcall(function() return part.Position end)
+    if ok and pos and type(pos.X) == "number" then return pos end
+    return nil
+end
+
+local GM_ROOT_NAMES = { "HumanoidRootPart", "Root", "Torso", "UpperTorso", "LowerTorso", "Head" }
+
+local function gmRootPos(model)
+    if not model then return nil end
+    for _, name in ipairs(GM_ROOT_NAMES) do
+        local ok, part = pcall(function() return model:FindFirstChild(name) end)
+        local pos = ok and gmPartPos(part) or nil
+        if pos then return pos end
+    end
+    local ok, pos = pcall(function()
+        local hum = model:FindFirstChildOfClass("Humanoid")
+        return gmPartPos(hum and hum.RootPart) or gmPartPos(model.PrimaryPart)
+    end)
+    return ok and pos or nil
+end
+
+-- asked at most ten times a second: the macro ticks far faster than a player
+-- closes the gap, and walking the target list on every swap adds up
+local gmDistAt, gmDistVal = 0, nil
+
+local function gmNearestDist()
+    local now = tick()
+    if now - gmDistAt < 0.1 then return gmDistVal end
+    gmDistAt = now
+    local lp = localPlayer()
+    local char = lp and lp.Character
+    local me = gmRootPos(char)
+    if not me then
+        gmDistVal = nil
+        return nil
+    end
+    -- the target the triggerbot is actually shooting wins whenever one is
+    -- locked, so a knocked body or a bot standing next to you cannot drag the
+    -- macro down to close range
+    local bot = _G.StellarTriggerbot
+    local locked = bot and bot.LockedTarget
+    if locked and locked ~= char then
+        local lpos = gmRootPos(locked)
+        if lpos then
+            gmDistVal = dist3(me, lpos)
+            return gmDistVal
+        end
+    end
+    local skipKo = cfg("tb_knock")
+    local best = nil
+    for _, t in ipairs(collectTargets()) do
+        if t.character ~= char then
+            local pos = gmRootPos(t.character)
+            if pos and (pos.X ~= 0 or pos.Y ~= 0 or pos.Z ~= 0)
+                and not (skipKo and isKnocked(t.character)) then
+                local d = dist3(me, pos)
+                if not best or d < best then best = d end
+            end
+        end
+    end
+    gmDistVal = best
+    return best
+end
+
+-- keep only the tightest range group that reaches the enemy. when nothing is in
+-- range the longest range is used rather than the whole cycle, so at distance
+-- only the long gun keeps firing instead of the macro swapping to the shotguns
+local function gmDistFilter(slots)
+    if not cfg("gm_dist_on") then return slots end
+    local d = gmNearestDist()
+    if not d then return slots end
+    local best, far = nil, nil
+    for _, s in ipairs(slots) do
+        local r = gmRange(s.gun)
+        if d <= r then
+            -- first reach sets the tier, so an unlimited (math.huge) gun still wins
+            if best == nil or r < best then best = r end
+        elseif r < math.huge then
+            if not far or r > far then far = r end
+        end
+    end
+    local want = best or far
+    if not want then return slots end
+    local out = {}
+    for _, s in ipairs(slots) do
+        if gmRange(s.gun) == want then out[#out + 1] = s end
+    end
+    if #out == 0 then return slots end
+    return out
+end
+
+-- ---------------------------------------------------------------
+-- Target visuals. One drawing set per character, created the first time
+-- that character is on screen and hidden again when it leaves view.
+-- everything is red except the bars: the health bar fades green -> yellow
+-- -> red with the humanoid, and the shield bar (BodyEffects.Armor) is blue.
+-- ---------------------------------------------------------------
+local ESP_RED = Color3.fromRGB(255, 60, 60)
+local ESP_SHIELD = Color3.fromRGB(70, 145, 255)
+local ESP_BAR_BG = Color3.fromRGB(24, 24, 26)
+
+-- r15 limbs, each with the r6 name of the same bone as a fallback
+local ESP_BONES = {
+    { "Head", "UpperTorso" },
+    { "UpperTorso", "LowerTorso" },
+    { "UpperTorso", "LeftUpperArm" },
+    { "LeftUpperArm", "LeftLowerArm" },
+    { "LeftLowerArm", "LeftHand" },
+    { "UpperTorso", "RightUpperArm" },
+    { "RightUpperArm", "RightLowerArm" },
+    { "RightLowerArm", "RightHand" },
+    { "LowerTorso", "LeftUpperLeg" },
+    { "LeftUpperLeg", "LeftLowerLeg" },
+    { "LeftLowerLeg", "LeftFoot" },
+    { "LowerTorso", "RightUpperLeg" },
+    { "RightUpperLeg", "RightLowerLeg" },
+    { "RightLowerLeg", "RightFoot" },
+}
+
+local ESP_ALIAS = {
+    UpperTorso = "Torso", LowerTorso = "Torso",
+    LeftUpperArm = "Left Arm", RightUpperArm = "Right Arm",
+    LeftLowerArm = "Left Arm", RightLowerArm = "Right Arm",
+    LeftHand = "Left Arm", RightHand = "Right Arm",
+    LeftUpperLeg = "Left Leg", RightUpperLeg = "Left Leg",
+    LeftLowerLeg = "Left Leg", RightLowerLeg = "Right Leg",
+    LeftFoot = "Left Leg", RightFoot = "Right Leg",
+}
+
+local espSets = {}
+local espPruneAt = 0
+
+local function espPart(ch, name)
+    local ok, part = pcall(function() return ch:FindFirstChild(name) end)
+    local pos = ok and gmPartPos(part) or nil
+    if pos then return pos end
+    local alt = ESP_ALIAS[name]
+    if not alt then return nil end
+    ok, part = pcall(function() return ch:FindFirstChild(alt) end)
+    return ok and gmPartPos(part) or nil
+end
+
+local function espDrawBar(b, x, y, w, h, frac, color)
+    if not frac then
+        b.bg.Visible, b.fl.Visible = false, false
+        return
+    end
+    if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
+    b.bg.Position = Vector2.new(x, y)
+    b.bg.Size = Vector2.new(w, h)
+    b.bg.Visible = true
+    b.fl.Color = color
+    b.fl.Position = Vector2.new(x, y + h * (1 - frac))
+    b.fl.Size = Vector2.new(w, h * frac)
+    b.fl.Visible = frac > 0.005
+end
+
+local function espHpColor(f)
+    if f > 0.6 then return Color3.fromRGB(70, 220, 120) end
+    if f > 0.3 then return Color3.fromRGB(240, 195, 60) end
+    return Color3.fromRGB(235, 72, 72)
+end
+
+local function espMake()
+    local s = { bones = {}, shown = false, armorMax = 100 }
+
+    local box = Drawing.new("Square")
+    box.Filled, box.Thickness, box.Color, box.Visible = false, 1, ESP_RED, false
+    s.box = box
+
+    local nm = Drawing.new("Text")
+    nm.Size, nm.Color, nm.Center, nm.Outline, nm.Visible = 12, ESP_RED, true, true, false
+    pcall(function() nm.OutlineColor = Color3.fromRGB(0, 0, 0) end)
+    -- plex is the cleanest face the drawing api offers; step down through the
+    -- older font sets for executors that do not ship it
+    for _, key in ipairs({ "Plex", "System", "UI" }) do
+        local okFont = pcall(function() nm.Font = Drawing.Fonts[key] end)
+        if okFont then break end
+    end
+    s.name = nm
+
+    for i = 1, #ESP_BONES do
+        local l = Drawing.new("Line")
+        l.Thickness, l.Color, l.Visible = 1, ESP_RED, false
+        s.bones[i] = l
+    end
+
+    for _, k in ipairs({ "hp", "sh" }) do
+        local bg = Drawing.new("Square")
+        bg.Filled, bg.Color, bg.Visible = true, ESP_BAR_BG, false
+        local fl = Drawing.new("Square")
+        fl.Filled, fl.Visible = true, false
+        s[k] = { bg = bg, fl = fl }
+    end
+
+    return s
+end
+
+local function espHide(s)
+    s.box.Visible, s.name.Visible = false, false
+    for i = 1, #s.bones do s.bones[i].Visible = false end
+    s.hp.bg.Visible, s.hp.fl.Visible = false, false
+    s.sh.bg.Visible, s.sh.fl.Visible = false, false
+    s.shown = false
+end
+
+-- armor is the shield here. the ceiling is per character and starts at 100 so
+-- a plain 100 armour player fills the bar, while servers that hand out more
+-- (200 was seen) stretch it instead of overflowing
+local function espShieldFrac(s, ch)
+    local ok, be = pcall(function() return ch:FindFirstChild("BodyEffects") end)
+    if not ok or not be then return nil end
+    local okA, armor = pcall(function()
+        local a = be:FindFirstChild("Armor")
+        return a and tonumber(a.Value)
+    end)
+    if not okA or not armor then return nil end
+    if armor > s.armorMax then s.armorMax = armor end
+    return armor / math.max(s.armorMax, 1)
+end
+
+local function updateESP()
+    -- selected targets only, the same players the old target visuals drew for:
+    -- nothing is painted for somebody you have not picked, and every feature
+    -- has its own toggle in the sticky aim card
+    local cam = Workspace.CurrentCamera
+    local lens = (cfg("tb_selvis") and cam) and lensInfo() or nil
+    if not lens then
+        for _, s in pairs(espSets) do
+            if s.shown then espHide(s) end
+        end
+        return
+    end
+
+    local maxDist = tonumber(cfg("esp_dist")) or 1000
+    local wantBox = cfg("esp_box") == true
+    local wantName = cfg("esp_name") == true
+    local wantSkel = cfg("esp_skel") == true
+    local wantHp = cfg("esp_hp") == true
+    local wantSh = cfg("esp_shield") == true
+    local now = tick()
+    local seen = {}
+
+    for key, t in pairs(SELECTED) do
+        local ch = t.character
+        local inTree = false
+        if ch then
+            local okTree, live = pcall(function() return ch.Parent ~= nil end)
+            inTree = okTree and live == true
+        end
+        local pos = inTree and gmRootPos(ch) or nil
+        local sp, onScreen = nil, false
+        if pos and (maxDist <= 0 or dist3(cam.Position, pos) <= maxDist) then
+            sp, onScreen = WorldToScreen(pos)
+        end
+
+        local s = espSets[key]
+        if onScreen and sp then
+            if not s then
+                s = espMake()
+                espSets[key] = s
+            end
+            seen[key] = true
+            s.seenAt, s.shown = now, true
+
+            local d = dist3(cam.Position, pos)
+            local pxs = (lens.vp.Y * 0.5) / math.tan(math.rad(lens.fov) * 0.5) / math.max(d, 0.05)
+            local bh, bw = 5 * pxs, 3 * pxs
+            local bx, by = sp.X - bw / 2, sp.Y - bh / 2
+
+            s.box.Color = ESP_RED
+            s.box.Thickness = 2
+            s.box.Position = Vector2.new(bx, by)
+            s.box.Size = Vector2.new(bw, bh)
+            s.box.Visible = wantBox
+
+            s.name.Text = tostring(t.player and t.player.Name or ch.Name)
+            s.name.Position = Vector2.new(sp.X, by - 17)
+            s.name.Visible = wantName
+
+            for i, bone in ipairs(ESP_BONES) do
+                local line = s.bones[i]
+                local a, b = nil, nil
+                if wantSkel then
+                    a, b = espPart(ch, bone[1]), espPart(ch, bone[2])
+                end
+                if a and b then
+                    local p1, v1 = WorldToScreen(a)
+                    local p2, v2 = WorldToScreen(b)
+                    if v1 and v2 then
+                        line.From, line.To = p1, p2
+                        line.Visible = true
+                    else
+                        line.Visible = false
+                    end
+                else
+                    line.Visible = false
+                end
+            end
+
+            local hf = nil
+            if wantHp then
+                local hum = ch:FindFirstChildOfClass("Humanoid")
+                local mx = hum and tonumber(hum.MaxHealth) or 0
+                if mx and mx > 0 then hf = (tonumber(hum.Health) or 0) / mx end
+            end
+            if hf then
+                espDrawBar(s.hp, bx - 6, by, 3, bh, hf, espHpColor(hf))
+            else
+                s.hp.bg.Visible, s.hp.fl.Visible = false, false
+            end
+
+            local sf = wantSh and espShieldFrac(s, ch) or nil
+            if sf then
+                espDrawBar(s.sh, bx - 11, by, 3, bh, sf, ESP_SHIELD)
+            else
+                s.sh.bg.Visible, s.sh.fl.Visible = false, false
+            end
+        end
+    end
+
+    -- a pick that got unselected, died or walked off screen stops drawing here
+    for key, s in pairs(espSets) do
+        if not seen[key] and s.shown then espHide(s) end
+    end
+
+    if now - espPruneAt > 3 then
+        espPruneAt = now
+        for key, s in pairs(espSets) do
+            if not SELECTED[key] then
+                espHide(s)
+                pcall(function()
+                    s.box:Remove()
+                    s.name:Remove()
+                    for _, l in ipairs(s.bones) do l:Remove() end
+                    s.hp.bg:Remove(); s.hp.fl:Remove()
+                    s.sh.bg:Remove(); s.sh.fl:Remove()
+                end)
+                espSets[key] = nil
+            end
+        end
+    end
+end
+
+local espErr = nil
+local function espSafe()
+    local ok, err = pcall(updateESP)
+    if not ok and err ~= espErr then
+        espErr = err
+        warn("target visuals error: " .. tostring(err))
+    end
+end
+
+local espHooked = false
+pcall(function()
+    local rs = game:GetService("RunService")
+    if rs and rs.RenderStepped then
+        rs.RenderStepped:Connect(espSafe)
+        espHooked = true
+    end
+end)
+
+if not espHooked then
+    spawn(function()
+        while true do
+            espSafe()
+            wait(0.01)
+        end
+    end)
+end
+
+-- let go of whatever key the last swap pressed
+local function gmRelease()
+    if gmHeldVk then
+        pcall(keyrelease, gmHeldVk)
+        gmHeldVk = nil
+    end
+end
+
+-- is this exact gun the tool in hand right now? a dry ticked gun left in hand
+-- must not count as "a ticked gun is out", or the last gun with ammo never
+-- gets pulled while the empty one sits there
+local function gmOnGun(g)
+    local held = heldToolName()
+    if not held then return false end
+    local low = tostring(held):lower()
+    if g then return g.test(low) end
+    for _, x in ipairs(gmEnabled()) do
+        if x.test(low) then return true end
+    end
+    return false
+end
+
+-- press the next ticked gun's hotbar key and hold it until the next swap
+local function gmStepKeys()
+    local ammoOn = cfg("gm_ammo") and true or false
+    local slots = gmDistFilter(gmSlots(ammoOn and gmPool() or {}, ammoOn))
+    local n = #slots
+    if n == 0 then
+        -- nothing has ammo: leave whatever is in hand alone. releasing the
+        -- hotbar key does not unequip a tool
+        gmRelease()
+        gmPin, gmCheckAt = nil, 0
+        return
+    end
+    if n == 1 then
+        -- one gun left with ammo: pin to that gun. its slot is only pressed again
+        -- once that exact gun has left the hand (respawn, manual switch, the game
+        -- unequipping it), never while it is out, so it cannot be pulled out and
+        -- straight back in on the same gun. the ammo filter still flickers this
+        -- list 1 -> 0 -> 1 while the gun reloads, and a dry ticked gun sitting in
+        -- hand does not count as this gun being out
+        local s = slots[1]
+        local vk = 0x30 + s.slot
+        if s.slot ~= gmPin then
+            gmPin, gmCheckAt = s.slot, 0
+        end
+        if gmHeldVk and gmHeldVk ~= vk then gmRelease() end
+        gmHeldVk = vk
+        local now = tick()
+        -- mm2 sometimes swallows the first hotkey press after a switch, so retry a
+        -- quarter second later instead of once a second. a press only happens while
+        -- this gun is NOT in hand, so retrying cannot pump it in and out
+        if now - gmCheckAt < 0.25 then return end
+        gmCheckAt = now
+        if gmOnGun(s.gun) then return end
+        gmRelease()
+        if pcall(keypress, vk) then gmHeldVk = vk end
+        return
+    end
+    gmPin = nil
+    gmIdx = (gmIdx % n) + 1
+    local vk = 0x30 + slots[gmIdx].slot
+    gmRelease()
+    if pcall(keypress, vk) then gmHeldVk = vk end
+end
+
+-- direct equip, for games that let a script move the tool itself
+local function gmStepEquip()
+    local pool, hum = gmPool()
+    if not hum or #pool == 0 then return end
+    local held = heldToolName()
+    -- same distance gate as the key method, so both methods pick the same gun
+    local allow = {}
+    for _, s in ipairs(gmDistFilter(gmSlots(pool, cfg("gm_ammo") and true or false))) do
+        allow[#allow + 1] = s.gun
+    end
+    local tool
+    for _, t in ipairs(pool) do
+        if t.Name ~= held then
+            if not gmToolEmpty(t) and gmWanted(t.Name, allow) then
+                tool = t
+                break
+            end
+        end
+    end
+    -- no other gun has ammo: stay on the gun in hand instead of equipping a
+    -- known-empty one and pulling it back out on the next swap
+    if not tool then return end
+    pcall(function()
+        if cfg("gm_drop") then hum:UnequipTools() end
+        hum:EquipTool(tool)
+    end)
+end
+
+local function gmStep()
+    if not gmActive() then
+        gmRelease()
+        return
+    end
+    local now = tick()
+    if now < gmNext then return end
+    local delay = (tonumber(cfg("gm_delay")) or 60) / 1000
+    gmNext = now + math.max(delay, 0.01)
+
+    if cfg("gm_method") == "equip" then
+        gmStepEquip()
+    else
+        gmStepKeys()
+    end
+end
+
+local function gmStepSafe()
+    local ok, err = pcall(gmStep)
+    if not ok and err ~= gmErr then
+        gmErr = err
+        warn("gun macro error: " .. tostring(err))
+    end
+end
+
+local gmHooked = false
+pcall(function()
+    local rs = game:GetService("RunService")
+    if rs and rs.Heartbeat then
+        rs.Heartbeat:Connect(gmStepSafe)
+        gmHooked = true
+    end
+end)
+
+if not gmHooked then
+    spawn(function()
+        while true do
+            gmStepSafe()
+            wait(0.01)
+        end
+    end)
+end
+
+local function safeStep()
+    local ok, err = pcall(step)
+    if not ok and err ~= lastErr then
+        lastErr = err
+        warn("triggerbot error: " .. tostring(err))
+    end
+end
+
+local loopHooked = false
+pcall(function()
+    local rs = game:GetService("RunService")
+    if rs and rs.Heartbeat then
+        rs.Heartbeat:Connect(safeStep)
+        loopHooked = true
+    end
+end)
+
+if not loopHooked then -- fallback if Heartbeat isn't there
+    spawn(function()
+        while true do
+            safeStep()
+            wait(0.001)
+        end
+    end)
+end
+
+local CFG_DIR = "triggerbot"
+
+local function cfgPath(name)
+    return CFG_DIR .. "/" .. name .. ".cfg"
+end
+
+local function saveConfig(name)
+    local lines = {}
+    for k, val in pairs(CFG) do
+        -- menu-only state (file slots, display names) stays out of the file
+        if not k:match("^cfg") and not k:match("Name$") then
+            lines[#lines + 1] = k .. "=" .. tostring(val)
+        end
+    end
+    table.sort(lines)
+    pcall(makefolder, CFG_DIR)
+    return pcall(writefile, cfgPath(name), table.concat(lines, "\n"))
+end
+
+local function loadConfig(name)
+    local ok, raw = pcall(readfile, cfgPath(name))
+    if not ok or type(raw) ~= "string" then return false end
+    for line in raw:gmatch("[^\r\n]+") do
+        local k, val = line:match("^([%w_]+)=(.*)$")
+        if k and CFG[k] ~= nil then
+            local n = tonumber(val)
+            if n then
+                CFG[k] = n
+            elseif val == "true" then
+                CFG[k] = true
+            elseif val == "false" then
+                CFG[k] = false
+            elseif k == "tb_kbmode" or k == "gm_mode" or k == "gm_method" then
+                -- string settings: numbers and booleans cannot carry them
+                CFG[k] = val
+            end
+        end
+    end
+    return true
+end
+
+-- ---------------------------------------------------------------
+-- autoload: remember the last config used and restore it on start
+-- ---------------------------------------------------------------
+local AUTO_FILE = CFG_DIR .. "/autoload.txt"
+
+local function setAutoName(name)
+    pcall(makefolder, CFG_DIR)
+    pcall(writefile, AUTO_FILE, tostring(name or ""))
+end
+
+local function getAutoName()
+    local ok, raw = pcall(readfile, AUTO_FILE)
+    if not ok or type(raw) ~= "string" then return nil end
+    local n = raw:gsub("[^%w_%- ]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if #n == 0 then return nil end
+    return n
+end
+
+if CFG.tb_autoload == nil then CFG.tb_autoload = true end
+
+local function autoloadOnStart()
+    if CFG.tb_autoload == false then return end
+    local name = getAutoName()
+    if not name then return end
+    if loadConfig(name) then
+        CFG.cfgName = name
+    end
+end
+
+autoloadOnStart()
+
+local function scanConfigs()
+    local out = {}
+    local ok, files = pcall(listfiles, CFG_DIR)
+    if ok and type(files) == "table" then
+        for _, f in ipairs(files) do
+            local n = tostring(f):match("([^/\\]+)%.cfg$")
+            if n then out[#out + 1] = n end
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+-- =====================================================================
+-- menu -- ui-menu, inlined
+--
+-- A pasted script cannot see files next to the project copy of this file:
+-- readfile("ui-menu.lua") fails in the executor sandbox, so the menu
+-- library is carried here instead of loaded. This block mirrors
+-- ui-menu.lua; keep the two in sync when either one changes.
+--
+-- CFG doubles as the menu's value store, so every widget id is a setting
+-- id and no second copy of the state has to be kept in sync.
+--
+-- Rows: toggle, slider, key, cycle, text, button, file, note.
+-- =====================================================================
+
+local MenuLib = {}
+MenuLib.version = "1.0"
+
+-- Palette. Override any key with config.theme = { accent = ... }.
+MenuLib.theme = {
+    win = Color3.fromRGB(10, 10, 12),
+    winBorder = Color3.fromRGB(38, 38, 44),
+    side = Color3.fromRGB(12, 12, 14),
+    line = Color3.fromRGB(26, 26, 31),
+    top = Color3.fromRGB(14, 14, 17),
+    card = Color3.fromRGB(16, 16, 20),
+    cardBorder = Color3.fromRGB(36, 36, 42),
+    header = Color3.fromRGB(20, 20, 24),
+    accent = Color3.fromRGB(255, 58, 116),
+    text = Color3.fromRGB(234, 234, 240),
+    dim = Color3.fromRGB(178, 178, 186),
+    mute = Color3.fromRGB(126, 126, 136),
+    track = Color3.fromRGB(32, 32, 38),
+    knob = Color3.fromRGB(8, 8, 10),
+    titleText = Color3.fromRGB(196, 196, 204),
+    field = Color3.fromRGB(21, 21, 26),
+    fieldBorder = Color3.fromRGB(40, 40, 47),
+    box = Color3.fromRGB(19, 19, 23),
+    boxBorder = Color3.fromRGB(46, 46, 54),
+    hot = Color3.fromRGB(255, 58, 116),
+    hi = Color3.fromRGB(30, 30, 36),
+    edge = Color3.fromRGB(48, 48, 56),
+    handle = Color3.fromRGB(232, 232, 238),
+}
+
+-- SystemBold is the closest thing this VM has to a cheat-menu label face:
+-- narrow, flat, and legible at 10-11px. Override with config.font.
+local FONT = 11
+pcall(function() FONT = Drawing.Fonts.SystemBold end)
+
+-- Keycodes offered while rebinding, with their display names.
+local KEY_NAMES = {
+    [0x08] = "Backspace", [0x09] = "Tab", [0x0D] = "Enter", [0x10] = "Shift",
+    [0x11] = "Ctrl", [0x12] = "Alt", [0x14] = "CapsLock", [0x1B] = "Escape",
+    [0x20] = "Space", [0x21] = "PageUp", [0x22] = "PageDown", [0x23] = "End",
+    [0x24] = "Home", [0x25] = "Left", [0x26] = "Up", [0x27] = "Right", [0x28] = "Down",
+    [0x2D] = "Insert", [0x2E] = "Delete",
+    [0xBA] = ";", [0xBB] = "=", [0xBC] = ",", [0xBD] = "-", [0xBE] = ".", [0xBF] = "/",
+}
+for c = 0x30, 0x39 do KEY_NAMES[c] = string.char(c) end
+for c = 0x41, 0x5A do KEY_NAMES[c] = string.char(c) end
+for i = 1, 12 do KEY_NAMES[0x70 + i - 1] = "F" .. i end
+-- Mouse buttons are bindable too: the VM reports those through their own
+-- predicates rather than iskeypressed.
+KEY_NAMES[0x01] = "LMB"
+KEY_NAMES[0x02] = "RMB"
+KEY_NAMES[0x04] = "MMB"
+KEY_NAMES[0x05] = "MB4"
+KEY_NAMES[0x06] = "MB5"
+
+local KEY_LIST = {}
+for code in pairs(KEY_NAMES) do KEY_LIST[#KEY_LIST + 1] = code end
+
+-- One predicate for anything bindable, mouse buttons included.
+local MOUSE_DOWN = {
+    [0x01] = function() local ok, r = pcall(ismouse1pressed) return ok and r == true end,
+    [0x02] = function() local ok, r = pcall(ismouse2pressed) return ok and r == true end,
+}
+-- Middle and side buttons only exist as predicates on some builds. Where the
+-- predicate is missing the entry is skipped, and keyHeld falls through to
+-- iskeypressed with the Windows VK code instead.
+local SIDE_BTN = {
+    [0x04] = ismouse3pressed,
+    [0x05] = ismouse4pressed,
+    [0x06] = ismouse5pressed,
+}
+for code, fn in pairs(SIDE_BTN) do
+    if type(fn) == "function" then
+        MOUSE_DOWN[code] = function() local ok, r = pcall(fn) return ok and r == true end
+    end
+end
+-- Buttons this VM never reports through iskeypressed (mouse 4/5, media
+-- keys) still arrive as InputBegan keycodes, so mirror them from the events.
+local UIS_HELD = {}
+pcall(function()
+    local uis = game:GetService("UserInputService")
+    if uis and uis.InputBegan then
+        uis.InputBegan:Connect(function(input)
+            local kc = input and input.KeyCode
+            if type(kc) == "number" then UIS_HELD[kc] = true end
+        end)
+    end
+    if uis and uis.InputEnded then
+        uis.InputEnded:Connect(function(input)
+            local kc = input and input.KeyCode
+            if type(kc) == "number" then UIS_HELD[kc] = nil end
+        end)
+    end
+end)
+
+local function keyHeld(code)
+    local fn = MOUSE_DOWN[code]
+    if fn then return fn() end
+    local ok, r = pcall(iskeypressed, code)
+    if ok and r == true then return true end
+    return UIS_HELD[code] == true
+end
+
+-- Characters typed into a text or number field, by keycode.
+local CHAR_MAP = {
+    [0x08] = "\b", [0x0D] = "\n", [0x1B] = "\x1b",
+    [0x20] = " ", [0xBA] = "_", [0xBB] = "+",
+    [0xBD] = "-", [0x6D] = "-", [0xBE] = ".", [0x6E] = ".",
+}
+for c = 0, 9 do
+    CHAR_MAP[0x30 + c] = tostring(c)
+    CHAR_MAP[0x60 + c] = tostring(c)
+end
+for c = 0x41, 0x5A do CHAR_MAP[c] = string.char(c + 32) end
+
+local CHAR_LIST = {}
+for code in pairs(CHAR_MAP) do CHAR_LIST[#CHAR_LIST + 1] = code end
+
+-- Integer sliders round on the way in, so %d never sees a float.
+local function isIntFmt(fmt)
+    return fmt == "%d" or fmt == "%dms" or fmt == "%d%%"
+end
+local function fmtNum(fmt, v)
+    if isIntFmt(fmt) then v = math.floor(v + 0.5) end
+    return string.format(fmt, v)
+end
+
+MenuLib.keyNames = KEY_NAMES
+function MenuLib.keyName(code)
+    if type(code) ~= "number" then return "-" end
+    return KEY_NAMES[code] or ("0x" .. string.format("%02X", code))
+end
+
+-- =====================================================================
+-- MenuLib.new(config) -> menu
+--
+-- config: title, x, y, w, h, sidebar, key, keyName, open, tab, values,
+--         theme, pool, sections, tabs, cards
+-- tabs:  tab index -> card ids; ids alternate columns, { id, col } pins one
+-- cards: card id -> { title, toggle?, rows }
+-- A card's `toggle` id draws a switch in its header and controls the card.
+-- =====================================================================
+function MenuLib.new(config)
+    config = config or {}
+
+    local T = {}
+    for k, v in pairs(MenuLib.theme) do T[k] = v end
+    if config.theme then
+        for k, v in pairs(config.theme) do T[k] = v end
+    end
+
+    local values = config.values or {}
+    local cards = config.cards or {}
+    local tabs = config.tabs or {}
+    local sections = config.sections or {}
+    local title = config.title or "MENU"
+    local listeners = {}
+
+    local TOPBAR = 26   -- title strip; dragging it moves the window
+    local TABBAR = 26   -- primary tab row
+    local SUBBAR = 22   -- secondary tab row
+    local SIDEBAR = config.sidebar or 0
+    local PADX = 10
+    local PADB = 26   -- breathing room under the last card
+    local CARD_HDR = 16
+    local ROW_H = 20
+
+    local M = {
+        open = config.open ~= false,
+        x = config.x or 80,
+        y = config.y or 80,
+        w = config.w or 560,
+        h = config.h or 240,
+    }
+
+    if values.menuKey == nil then values.menuKey = config.key or 0x4B end
+    if values.menuKeyName == nil then
+        values.menuKeyName = config.keyName or MenuLib.keyName(values.menuKey)
+    end
+
+    local CUR_TAB = config.tab or 1
+    local HITS = {}
+    local dirty = true
+    local listeningId = nil -- bind row waiting for the user to press a key
+    local editing = nil     -- { id, buf, numeric, min, max, fmt, prev }
+    local confirmBox = nil  -- { text, onYes }
+    local destroyed = false
+
+    local dragging, dragOffX, dragOffY = false, 0, 0
+    local sliderHit = nil
+    local prevClick, prevKey = false, false
+    local armDown = {}
+
+    -- ---------------------------------------------------------------
+    -- Drawing pools. Two square pools (rounded for panels/pills, plain
+    -- for hairlines) plus a text pool. Created once, hidden when unused.
+    -- ---------------------------------------------------------------
+    local poolCfg = config.pool or {}
+    local SQ_ROUND, SQ_PLAIN, TX_POOL = {}, {}, {}
+    local sqN, spN, txtN = 0, 0, 0
+
+    for i = 1, (poolCfg.round or 140) do
+        local s = Drawing.new("Square")
+        s.Color = T.text
+        s.Filled = true
+        s.Thickness = 1
+        s.ZIndex = 10
+        -- never write Transparency on a Square: any write makes it disappear in this VM
+        s.Visible = false
+        pcall(function() s.Rounding = 4 end)
+        SQ_ROUND[i] = s
+    end
+    for i = 1, (poolCfg.plain or 200) do
+        local s = Drawing.new("Square")
+        s.Color = T.text
+        s.Filled = true
+        s.Thickness = 1
+        s.ZIndex = 9
+        s.Visible = false
+        SQ_PLAIN[i] = s
+    end
+    for i = 1, (poolCfg.text or 160) do
+        local t = Drawing.new("Text")
+        t.Size = 12
+        t.Color = T.text
+        t.ZIndex = 11
+        t.Outline = false
+        t.Visible = false
+        pcall(function() t.Font = FONT end)
+        TX_POOL[i] = t
+    end
+
+    local function rq(x, y, w, h, color, z)
+        sqN = sqN + 1
+        local s = SQ_ROUND[sqN]
+        if not s then
+            s = Drawing.new("Square")
+            s.Color = T.text
+            s.Filled = true
+            s.Thickness = 1
+            s.Visible = false
+            pcall(function() s.Rounding = 4 end)
+            SQ_ROUND[sqN] = s
+        end
+        s.Position = Vector2.new(x, y)
+        s.Size = Vector2.new(w, h)
+        s.Color = color
+        s.ZIndex = z or 10
+        s.Visible = true
+        return s
+    end
+
+    local function pq(x, y, w, h, color, z)
+        spN = spN + 1
+        local s = SQ_PLAIN[spN]
+        if not s then
+            s = Drawing.new("Square")
+            s.Color = T.text
+            s.Filled = true
+            s.Thickness = 1
+            s.Visible = false
+            SQ_PLAIN[spN] = s
+        end
+        s.Position = Vector2.new(x, y)
+        s.Size = Vector2.new(w, h)
+        s.Color = color
+        s.ZIndex = z or 9
+        s.Visible = true
+        return s
+    end
+
+    local function stroke(x, y, w, h, color, z)
+        pq(x, y, w, 1, color, z)
+        pq(x, y + h - 1, w, 1, color, z)
+        pq(x, y + 1, 1, h - 2, color, z)
+        pq(x + w - 1, y + 1, 1, h - 2, color, z)
+    end
+
+    local function tx(x, y, text, size, color, center, z)
+        txtN = txtN + 1
+        local t = TX_POOL[txtN]
+        if not t then
+            t = Drawing.new("Text")
+            t.Size = size or 12
+            t.Color = color or T.text
+            t.Outline = false
+            t.Visible = false
+            pcall(function() t.Font = FONT end)
+            TX_POOL[txtN] = t
+        end
+        t.Position = Vector2.new(x, y)
+        t.Size = size
+        t.Color = color
+        t.Center = center == true
+        t.Text = text
+        t.ZIndex = z or 11
+        t.Visible = true
+        return t
+    end
+
+    -- ---------------------------------------------------------------
+    -- State changes go through here so menu.on() callbacks fire.
+    -- ---------------------------------------------------------------
+    local function fireChanged(id, value)
+        local fn = listeners[id]
+        if fn then pcall(fn, value, id) end
+        local any = listeners["*"]
+        if any then pcall(any, value, id) end
+    end
+
+    local function setValue(id, value)
+        values[id] = value
+        dirty = true
+        fireChanged(id, value)
+    end
+
+    local api
+
+    -- ---------------------------------------------------------------
+    -- Drawing
+    -- ---------------------------------------------------------------
+    local function rowHeight(row)
+        local k = row.kind
+        if k == "cycle" or k == "text" then return 30 end
+        if k == "slider" or k == "button" then return 24 end
+        if k == "note" then return 16 end
+        return 20
+    end
+
+    local function cardHeight(card)
+        local h = 8 + CARD_HDR + 6
+        for _, row in ipairs(card.rows or {}) do
+            h = h + rowHeight(row)
+        end
+        return h
+    end
+
+    -- Text width is not known to us, so titles are measured crudely; close
+    -- enough to size the notch that interrupts the box's top border.
+    local function approxW(s, size)
+        return #s * (size * 0.52) + 6
+    end
+
+    local function drawCard(id, x, y, w)
+        local card = cards[id]
+        if not card then return 0 end
+        local rows = card.rows or {}
+        local h = cardHeight(card)
+        local by0 = y + 8
+
+        pq(x, by0, w, h - 8, T.card, 10)
+        stroke(x, by0, w, h - 8, T.cardBorder, 10)
+        pq(x + 1, by0 + 1, w - 2, 1, T.edge, 10)
+        if card.toggle and values[card.toggle] == true then
+            pq(x, by0 + 1, 2, h - 10, T.accent, 11)
+        end
+
+        local label = card.title or id
+        local lw = approxW(label, 10)
+        tx(x + 14, by0 - 5, label, 10, T.mute, false, 12)
+        pq(x + 12, by0, lw + 6, 2, T.win, 11)
+
+        if card.toggle then
+            local on = values[card.toggle] == true
+            local pw, ph = 18, 9
+            local px, py = x + w - pw - 10, by0 + 4
+            rq(px, py, pw, ph, on and T.accent or T.track, 12)
+            rq(on and (px + pw - ph + 1) or (px + 1), py + 1, ph - 2, ph - 2, T.knob, 13)
+            HITS[#HITS + 1] = { x = px - 4, y = py - 4, w = pw + 8, h = ph + 8, kind = "toggle", id = card.toggle }
+        end
+
+        local ix = x + 10
+        local iw = w - 20
+        local ry = by0 + CARD_HDR
+        for _, row in ipairs(rows) do
+            if row.kind == "toggle" then
+                local on = values[row.id] == true
+                pq(ix, ry + 3, 10, 10, on and T.accent or T.box, 11)
+                stroke(ix, ry + 3, 10, 10, on and T.accent or T.boxBorder, 11)
+                tx(ix + 18, ry + 1, row.label or row.id, 11, T.dim, false, 11)
+                HITS[#HITS + 1] = { x = ix - 4, y = ry - 3, w = iw + 8, h = 20, kind = "toggle", id = row.id }
+            elseif row.kind == "slider" then
+                local lo = row.min or 0
+                local hi = row.max or 1
+                local fmt = row.fmt or "%.2f"
+                local val = values[row.id]
+                if val == nil then val = lo end
+                local f = (val - lo) / (hi - lo)
+                if f < 0 then f = 0 elseif f > 1 then f = 1 end
+                tx(ix, ry + 1, row.label or row.id, 11, T.dim, false, 11)
+                tx(x + w - 12, ry, fmtNum(fmt, val), 10, T.text, true, 11)
+                rq(ix, ry + 14, iw, 4, T.track, 11)
+                if f > 0 then rq(ix, ry + 14, iw * f, 4, T.accent, 12) end
+                rq(ix + iw * f - 3, ry + 12, 6, 8, T.handle, 13)
+                HITS[#HITS + 1] = { x = ix - 4, y = ry + 8, w = iw + 8, h = 14, kind = "slider", id = row.id,
+                    min = lo, max = hi, fmt = fmt, tx = ix, tw = iw }
+                -- appended last so the value box wins over the bar it sits on
+                HITS[#HITS + 1] = { x = x + w - 64, y = ry - 3, w = 54, h = 18, kind = "numedit",
+                    id = row.id, min = lo, max = hi, fmt = fmt }
+            elseif row.kind == "key" then
+                tx(ix, ry + 1, row.label or row.id, 11, T.dim, false, 11)
+                local hot = listeningId == row.id
+                local shown = values[row.id .. "Name"] or MenuLib.keyName(values[row.id])
+                local txt = hot and "[ ... ]" or ("[" .. shown .. "]")
+                local bw = approxW(txt, 10)
+                local bx = x + w - bw - 10
+                if hot then pq(bx - 3, ry, bw + 6, 14, T.hot, 11) end
+                tx(bx, ry + 1, txt, 10, hot and T.knob or T.accent, false, 12)
+                HITS[#HITS + 1] = { x = bx - 6, y = ry - 4, w = bw + 12, h = 20, kind = "key", id = row.id }
+            elseif row.kind == "cycle" then
+                local opts = row.options or {}
+                tx(ix, ry - 1, row.label or row.id, 10, T.mute, false, 11)
+                local fy = ry + 11
+                pq(ix, fy, iw, 14, T.field, 11)
+                stroke(ix, fy, iw, 14, T.fieldBorder, 11)
+                tx(ix + 6, fy + 1, tostring(values[row.id] or "-"), 10, T.text, false, 12)
+                tx(ix + iw - 8, fy + 1, "v", 10, T.mute, true, 12)
+                HITS[#HITS + 1] = { x = ix, y = fy - 2, w = iw, h = 18, kind = "cycle",
+                    id = row.id, options = opts }
+            elseif row.kind == "text" then
+                local hot = editing and editing.id == row.id
+                tx(ix, ry - 1, row.label or row.id, 10, T.mute, false, 11)
+                local fy = ry + 11
+                pq(ix, fy, iw, 14, T.field, 11)
+                stroke(ix, fy, iw, 14, hot and T.accent or T.fieldBorder, 11)
+                tx(ix + 6, fy + 1, hot and (editing.buf .. "_") or tostring(values[row.id] or ""),
+                    10, T.text, false, 12)
+                HITS[#HITS + 1] = { x = ix, y = fy - 2, w = iw, h = 18, kind = "text", id = row.id }
+            elseif row.kind == "button" then
+                local fy = ry + 2
+                pq(ix, fy, iw, 16, T.field, 11)
+                stroke(ix, fy, iw, 16, T.fieldBorder, 11)
+                tx(ix + iw / 2, fy + 2, row.label or row.id, 10, T.accent, true, 12)
+                HITS[#HITS + 1] = { x = ix, y = fy, w = iw, h = 16, kind = "button", id = row.action or row.id }
+            elseif row.kind == "note" then
+                tx(ix, ry + 4, row.label or "", 10, T.mute, false, 11)
+            elseif row.kind == "file" then
+                local fname = values[row.id]
+                tx(ix, ry + 4, fname and tostring(fname) or (row.label or ""), 10,
+                    fname and T.text or T.mute, false, 11)
+                if fname then
+                    local bw, bh, gap = 28, 14, 3
+                    local bx = x + w - 10 - (bw * 3 + gap * 2)
+                    local acts = { "load", "save", "del" }
+                    for ai = 1, 3 do
+                        local ax = bx + (ai - 1) * (bw + gap)
+                        local last = ai == 3
+                        pq(ax, ry + 2, bw, bh, T.field, 11)
+                        stroke(ax, ry + 2, bw, bh, T.fieldBorder, 11)
+                        tx(ax + bw / 2, ry + 3, last and "x" or acts[ai], 10,
+                            last and T.mute or T.accent, true, 12)
+                        HITS[#HITS + 1] = { x = ax, y = ry, w = bw, h = bh + 4, kind = "fileact",
+                            id = row.id, act = acts[ai], name = fname }
+                    end
+                end
+            end
+            ry = ry + rowHeight(row)
+        end
+        return h
+    end
+
+    -- a tab entry is a card id (columns alternate) or { id = ..., col = n }
+    local function tabId(entry)
+        if type(entry) == "table" then return entry.id end
+        return entry
+    end
+
+    local function tabCol(entry, i)
+        if type(entry) == "table" then return entry.col or 1 end
+        return ((i - 1) % 2) + 1
+    end
+
+    -- Cards per side and their natural heights. Cards stack with one tight,
+    -- fixed gap and both columns stay top aligned.
+    local function tabMetrics()
+        local list = tabs[CUR_TAB] or {}
+        local count, nat = { 0, 0 }, { 0, 0 }
+        local two = false
+        for i = 1, #list do
+            local col = tabCol(list[i], i)
+            if col > 2 then col = 2 end
+            if col > 1 then two = true end
+            local card = cards[tabId(list[i])]
+            if card then
+                count[col] = count[col] + 1
+                nat[col] = nat[col] + cardHeight(card)
+            end
+        end
+
+        return count, nat, 12, math.max(nat[1], nat[2]), two, { 0, 0 }
+    end
+
+    local function requiredHeight()
+        local _, _, _, contentH = tabMetrics()
+        local need = TOPBAR + TABBAR + SUBBAR + PADX + PADB + contentH
+        if need < (config.h or 0) then need = config.h end
+        return need
+    end
+
+    local function drawMenu()
+        sqN, spN, txtN = 0, 0, 0
+        HITS = {}
+        if not M.open then return end
+
+        M.h = requiredHeight()
+        local x, y, w, h = M.x, M.y, M.w, M.h
+
+        rq(x, y, w, h, T.win, 8)
+        stroke(x, y, w, h, T.winBorder, 8)
+        pq(x + 6, y, w - 12, 2, T.accent, 10)
+
+        -- title strip, centred and dim like a window caption
+        rq(x + 1, y + 1, w - 2, TOPBAR - 1, T.top, 9)
+        pq(x, y + TOPBAR, w, 1, T.line, 9)
+        tx(x + w / 2, y + 8, title, 10, T.mute, true, 11)
+
+        -- the primary tab that owns the active secondary tab
+        local secIdx = 1
+        for i = 1, #sections do
+            for _, item in ipairs(sections[i].items or {}) do
+                if item.tab == CUR_TAB then secIdx = i end
+            end
+        end
+
+        -- primary tab row
+        local pcount = math.max(1, #sections)
+        local ptabY = y + TOPBAR + 1
+        local pw = w / pcount
+        for i = 1, pcount do
+            local sxi = x + (i - 1) * pw
+            local active = i == secIdx
+            if active then rq(sxi + 6, ptabY + 4, pw - 12, TABBAR - 8, T.hi, 10) end
+            tx(sxi + pw / 2, ptabY + 9, sections[i].label or "", 11,
+                active and T.text or T.mute, true, 11)
+            if active then pq(sxi + pw * 0.33, ptabY + TABBAR - 1, pw * 0.34, 1, T.accent, 12) end
+            HITS[#HITS + 1] = { x = sxi, y = ptabY, w = pw, h = TABBAR, kind = "ptab", section = i }
+        end
+        pq(x, ptabY + TABBAR, w, 1, T.line, 9)
+
+        -- secondary tab row
+        local subY = ptabY + TABBAR + 1
+        local subs = (sections[secIdx] or {}).items or {}
+        local scount = math.max(1, #subs)
+        local sw = w / scount
+        for i = 1, scount do
+            local item = subs[i]
+            local sxi = x + (i - 1) * sw
+            local active = item ~= nil and item.tab == CUR_TAB
+            tx(sxi + 12, subY + 6, (item and item.label) or "", 11,
+                active and T.accent or T.mute, false, 11)
+            if active then pq(sxi + 12, subY + SUBBAR - 1, math.max(20, sw - 24), 1, T.accent, 12) end
+            HITS[#HITS + 1] = { x = sxi, y = subY, w = sw, h = SUBBAR, kind = "tab",
+                id = item and item.tab }
+        end
+        pq(x, subY + SUBBAR, w, 1, T.line, 9)
+
+        local list = tabs[CUR_TAB] or {}
+        local availW = w - PADX * 2
+        local _, _, gap, _, two, off = tabMetrics()
+        local colW = two and (availW - PADX) / 2 or availW
+        local cy0 = subY + SUBBAR + PADX
+        local colY = { cy0 + off[1], cy0 + off[2] }
+        for i = 1, #list do
+            local col = tabCol(list[i], i)
+            if col > 2 then col = 2 end
+            col = col - 1
+            local ch = drawCard(tabId(list[i]), x + PADX + col * (colW + PADX), colY[col + 1], colW)
+            colY[col + 1] = colY[col + 1] + ch + gap
+        end
+
+        if confirmBox then
+            local bw, bh = 250, 76
+            local bx = x + (w - bw) / 2
+            local by = y + (h - bh) / 2
+            rq(bx, by, bw, bh, T.card, 13)
+            stroke(bx, by, bw, bh, T.winBorder, 13)
+            tx(bx + 12, by + 14, confirmBox.text, 12, T.text, false, 14)
+            local yw, yh = 66, 18
+            local yx, yy = bx + 12, by + bh - 32
+            rq(yx, yy, yw, yh, T.accent, 13)
+            tx(yx + yw / 2, yy + 2, "yes", 11, T.knob, true, 14)
+            local nx = bx + bw - yw - 12
+            rq(nx, yy, yw, yh, T.track, 13)
+            tx(nx + yw / 2, yy + 2, "no", 11, T.text, true, 14)
+            HITS[#HITS + 1] = { x = yx, y = yy, w = yw, h = yh, kind = "confirmyes" }
+            HITS[#HITS + 1] = { x = nx, y = yy, w = yw, h = yh, kind = "confirmno" }
+        end
+
+        for i = sqN + 1, #SQ_ROUND do SQ_ROUND[i].Visible = false end
+        for i = spN + 1, #SQ_PLAIN do SQ_PLAIN[i].Visible = false end
+        for i = txtN + 1, #TX_POOL do TX_POOL[i].Visible = false end
+    end
+
+    local function hideAll()
+        for i = 1, #SQ_ROUND do SQ_ROUND[i].Visible = false end
+        for i = 1, #SQ_PLAIN do SQ_PLAIN[i].Visible = false end
+        for i = 1, #TX_POOL do TX_POOL[i].Visible = false end
+    end
+
+    local function setOpen(state)
+        M.open = state and true or false
+        dirty = true
+        if M.open then
+            drawMenu()
+        else
+            HITS = {}
+            hideAll()
+        end
+    end
+
+    -- ---------------------------------------------------------------
+    -- Input
+    -- ---------------------------------------------------------------
+    local function mousePos()
+        local ok, m = pcall(function() return game:GetService("Players").LocalPlayer:GetMouse() end)
+        if ok and m and m.X and m.Y then return m.X, m.Y end
+        return -1, -1
+    end
+
+    local function applySlider(hit, mx)
+        local f = (mx - hit.tx) / hit.tw
+        if f < 0 then f = 0 elseif f > 1 then f = 1 end
+        local val = hit.min + (hit.max - hit.min) * f
+        if isIntFmt(hit.fmt) then val = math.floor(val + 0.5) end
+        setValue(hit.id, val)
+    end
+
+    -- Later hits are drawn on top (the confirm modal over the cards), so the
+    -- topmost one wins a click.
+    local function hitAt(mx, my)
+        for i = #HITS, 1, -1 do
+            local h = HITS[i]
+            if mx >= h.x and mx <= h.x + h.w and my >= h.y and my <= h.y + h.h then return h end
+        end
+    end
+
+    -- Inline text / number editing: opened by a click, closed by Enter,
+    -- Escape, or a click anywhere else.
+    local function commitEdit()
+        if not editing then return end
+        local e = editing
+        editing = nil
+        if e.numeric then
+            local n = tonumber(e.buf)
+            if n then
+                if e.min and n < e.min then n = e.min end
+                if e.max and n > e.max then n = e.max end
+                if isIntFmt(e.fmt) then n = math.floor(n + 0.5) end
+                setValue(e.id, n)
+            end
+        else
+            local s = e.buf:gsub("^%s+", ""):gsub("%s+$", "")
+            if #s > 0 then setValue(e.id, s) end
+        end
+        dirty = true
+    end
+
+    local function startEdit(hit)
+        local cur = values[hit.id]
+        editing = {
+            id = hit.id,
+            buf = cur ~= nil and tostring(cur) or "",
+            numeric = hit.numeric == true,
+            min = hit.min, max = hit.max, fmt = hit.fmt,
+            prev = {},
+        }
+        dirty = true
+    end
+
+    local function editTick()
+        if not editing then return end
+        for i = 1, #CHAR_LIST do
+            local code = CHAR_LIST[i]
+            local held = keyHeld(code)
+            if held and not editing.prev[code] then
+                local ch = CHAR_MAP[code]
+                if ch == "\b" then
+                    editing.buf = editing.buf:sub(1, -2)
+                elseif ch == "\n" then
+                    commitEdit()
+                    return
+                elseif ch == "\x1b" then
+                    editing = nil
+                    dirty = true
+                    return
+                else
+                    local accept = true
+                    if editing.numeric and not ch:match("[%d%.%-]") then
+                        accept = false
+                    elseif ch == "." and editing.buf:find(".", 1, true) then
+                        accept = false
+                    elseif (ch == "-" or ch == "+") and #editing.buf > 0 then
+                        accept = false
+                    elseif not editing.numeric and ch == "+" then
+                        accept = false
+                    end
+                    if accept then editing.buf = editing.buf .. ch end
+                end
+                dirty = true
+            end
+            editing.prev[code] = held
+        end
+    end
+
+    local function openConfirm(text, onYes)
+        confirmBox = { text = text, onYes = onYes }
+        dirty = true
+    end
+
+    -- Bind mode: remember which keys are already down, then take the first new one.
+    local function startBind(id)
+        listeningId = id
+        armDown = {}
+        for i = 1, #KEY_LIST do
+            local code = KEY_LIST[i]
+            if keyHeld(code) then armDown[code] = true end
+        end
+        dirty = true
+    end
+
+    local function pollBind()
+        -- Keys already down when binding started (usually the LMB click that
+        -- opened it) are ignored until released once, so no key binds itself
+        -- from the opening click and mouse buttons can still be chosen.
+        for i = 1, #KEY_LIST do
+            local code = KEY_LIST[i]
+            if armDown[code] and not keyHeld(code) then armDown[code] = nil end
+        end
+        for i = 1, #KEY_LIST do
+            local code = KEY_LIST[i]
+            if not armDown[code] and keyHeld(code) then
+                local id = listeningId
+                listeningId = nil
+                if code ~= 0x1B and id then -- Escape cancels
+                    values[id] = code
+                    values[id .. "Name"] = MenuLib.keyName(code)
+                    fireChanged(id, code)
+                end
+                dirty = true
+                return true
+            end
+        end
+        return false
+    end
+
+    local function step()
+        if destroyed then return end
+
+        if listeningId then
+            pollBind()
+            local okC, c = pcall(ismouse1pressed)
+            prevClick = okC and c == true
+            prevKey = true
+            return
+        end
+
+        -- While a field is being typed into the menu key must not toggle
+        -- the menu: backspace is an edit there, not a close.
+        if editing then
+            editTick()
+            local okC, c = pcall(ismouse1pressed)
+            local down = okC and c == true
+            if down and not prevClick then commitEdit() end
+            prevClick = down
+            prevKey = true
+            if dirty then
+                drawMenu()
+                dirty = false
+            end
+            return
+        end
+
+        local keyDown = keyHeld(values.menuKey)
+        if keyDown and not prevKey then setOpen(not M.open) end
+        prevKey = keyDown
+
+        local okC, c = pcall(ismouse1pressed)
+        local down = okC and c == true
+
+        if not M.open then
+            prevClick = down
+            dragging, sliderHit = false, nil
+            return
+        end
+
+        local mx, my = mousePos()
+
+        if down and not prevClick then
+            if confirmBox then
+                local hit = hitAt(mx, my)
+                local onYes = confirmBox.onYes
+                local yes = hit and hit.kind == "confirmyes"
+                confirmBox = nil
+                dirty = true
+                if yes and onYes then pcall(onYes) end
+            elseif mx >= M.x and mx <= M.x + M.w and my >= M.y and my <= M.y + TOPBAR then
+                dragging = true
+                dragOffX, dragOffY = mx - M.x, my - M.y
+            else
+                local hit = hitAt(mx, my)
+                if hit then
+                    if hit.kind == "ptab" then
+                        local sec = sections[hit.section]
+                        if sec and sec.items and sec.items[1] then
+                            CUR_TAB = sec.items[1].tab
+                            dirty = true
+                        end
+                    elseif hit.kind == "tab" then
+                        if CUR_TAB ~= hit.id then
+                            CUR_TAB = hit.id
+                            dirty = true
+                        end
+                    elseif hit.kind == "toggle" then
+                        setValue(hit.id, not (values[hit.id] == true))
+                    elseif hit.kind == "slider" then
+                        sliderHit = hit
+                        applySlider(hit, mx)
+                    elseif hit.kind == "numedit" then
+                        startEdit({ id = hit.id, numeric = true, min = hit.min, max = hit.max, fmt = hit.fmt })
+                    elseif hit.kind == "text" then
+                        startEdit({ id = hit.id, numeric = false })
+                    elseif hit.kind == "key" then
+                        startBind(hit.id)
+                    elseif hit.kind == "cycle" then
+                        local opts = hit.options or {}
+                        local idx = 0
+                        for i = 1, #opts do
+                            if opts[i] == values[hit.id] then idx = i end
+                        end
+                        if #opts > 0 then
+                            local nxt = opts[(idx % #opts) + 1]
+                            if nxt then setValue(hit.id, nxt) end
+                        end
+                    elseif hit.kind == "button" then
+                        fireChanged(hit.id, true)
+                    elseif hit.kind == "fileact" then
+                        fireChanged(hit.id .. ":" .. hit.act, hit.name)
+                    end
+                end
+            end
+        elseif down and dragging then
+            M.x = mx - dragOffX
+            M.y = my - dragOffY
+            dirty = true
+        elseif down and sliderHit then
+            applySlider(sliderHit, mx)
+        end
+
+        if not down then
+            dragging, sliderHit = false, nil
+        end
+        prevClick = down
+
+        if dirty then
+            drawMenu()
+            dirty = false
+        end
+    end
+
+    local function destroy()
+        if destroyed then return end
+        destroyed = true
+        listeningId, editing, confirmBox = nil, nil, nil
+        for i = 1, #SQ_ROUND do pcall(function() SQ_ROUND[i]:Remove() end) end
+        for i = 1, #SQ_PLAIN do pcall(function() SQ_PLAIN[i]:Remove() end) end
+        for i = 1, #TX_POOL do pcall(function() TX_POOL[i]:Remove() end) end
+        HITS = {}
+    end
+
+    api = {
+        values = values,
+        config = config,
+        theme = T,
+
+        step = step,
+        draw = drawMenu,
+        redraw = function() dirty = true end,
+
+        setOpen = setOpen,
+        isOpen = function() return M.open end,
+        toggle = function() setOpen(not M.open) end,
+
+        set = setValue,
+        get = function(id) return values[id] end,
+        on = function(id, fn) listeners[id] = fn end,
+
+        confirm = openConfirm,
+        edit = startEdit,
+        isEditing = function() return editing ~= nil end,
+
+        tab = function(index)
+            CUR_TAB = index
+            dirty = true
+        end,
+        currentTab = function() return CUR_TAB end,
+
+        position = function(x, y)
+            M.x, M.y = x, y
+            dirty = true
+        end,
+        size = function(w, h)
+            if w then M.w = w end
+            if h then M.h = h end
+            dirty = true
+        end,
+        bounds = function() return M.x, M.y, M.w, M.h end,
+        hits = function() return HITS end,
+
+        destroy = destroy,
+        pools = { round = SQ_ROUND, plain = SQ_PLAIN, text = TX_POOL },
+    }
+
+    return api
+end
+CFG.cfgName = CFG.cfgName or "config1"
+if CFG.menuKey == nil then CFG.menuKey = 0x08 end
+
+local FILE_SLOTS = 8
+local fileRows = {}
+for i = 1, FILE_SLOTS do
+    fileRows[i] = { kind = "file", id = "cfgFile" .. i, label = "" }
+end
+
+local menu
+if MenuLib then
+local okNew, m = pcall(MenuLib.new, {
+    title = "TRIGGERBOT",
+    x = 60, y = 80, w = 620,
+    key = CFG.menuKey,
+    values = CFG,
+    sections = {
+        { label = "Aim", items = {
+            { label = "General", tab = 1 },
+            { label = "Weapons", tab = 2 },
+        } },
+        { label = "Target", items = {
+            { label = "Targeting", tab = 3 },
+            { label = "Accuracy", tab = 4 },
+        } },
+        { label = "Behavior", items = {
+            { label = "Humanization", tab = 5 },
+        } },
+        { label = "Profile", items = {
+            { label = "Configs", tab = 6 },
+        } },
+    },
+    tabs = {
+        [1] = { "main", "hitbox" },
+        [2] = {
+            { id = "weapons", col = 1 },
+            { id = "revolver", col = 1 },
+            { id = "double", col = 1 },
+            { id = "tac", col = 1 },
+            { id = "gmacro", col = 2 },
+            { id = "gmguns", col = 2 },
+        },
+        [3] = { "sticky" },
+        [4] = { "prediction", "bands" },
+        [5] = { "humanize", "hesitation" },
+        [6] = { "profile", "saved" },
+    },
+    cards = {
+        main = {
+            title = "Triggerbot",
+            toggle = "tb_enabled",
+            rows = {
+                { kind = "key", id = "tb_key", label = "Activation key" },
+                { kind = "cycle", id = "tb_kbmode", label = "Mode",
+                    options = { "hold", "toggle", "always" } },
+                { kind = "toggle", id = "tb_knock", label = "Knock check" },
+            },
+        },
+        hitbox = {
+            title = "Hitbox",
+            rows = {
+                { kind = "toggle", id = "tb_visualize", label = "Visualize" },
+                { kind = "slider", id = "tb_maxdist", label = "Max dist", min = 0, max = 2000, fmt = "%d" },
+                { kind = "slider", id = "tb_hitbox_x", label = "Hitbox X", min = 0.1, max = 5.0, fmt = "%.1f" },
+                { kind = "slider", id = "tb_hitbox_y", label = "Hitbox Y", min = 0.5, max = 8.0, fmt = "%.1f" },
+            },
+        },
+        weapons = {
+            title = "Weapon checks",
+            toggle = "tb_wepcheck",
+            rows = {
+                { kind = "toggle", id = "tb_rev_on", label = "Revolver" },
+                { kind = "toggle", id = "tb_db_on", label = "Double barrel" },
+                { kind = "toggle", id = "tb_tac_on", label = "Tac shotgun" },
+            },
+        },
+        revolver = {
+            title = "Revolver",
+            rows = {
+                { kind = "slider", id = "tb_rev_dist", label = "Range", min = 20, max = 1000, fmt = "%d" },
+            },
+        },
+        double = {
+            title = "Double barrel",
+            rows = {
+                { kind = "slider", id = "tb_db_dist", label = "Range", min = 20, max = 1000, fmt = "%d" },
+            },
+        },
+        tac = {
+            title = "Tac shotgun",
+            rows = {
+                { kind = "slider", id = "tb_tac_dist", label = "Range", min = 20, max = 1000, fmt = "%d" },
+            },
+        },
+        gmacro = {
+            title = "Gun macro",
+            toggle = "gm_on",
+            rows = {
+                { kind = "key", id = "gm_key", label = "Activation key" },
+                { kind = "cycle", id = "gm_mode", label = "Mode",
+                    options = { "hold", "toggle", "always" } },
+                { kind = "cycle", id = "gm_method", label = "Method",
+                    options = { "keys", "equip" } },
+                { kind = "slider", id = "gm_delay", label = "Swap delay", min = 10, max = 400, fmt = "%dms" },
+                { kind = "toggle", id = "gm_dist_on", label = "Distance based" },
+                { kind = "toggle", id = "gm_link", label = "Link to triggerbot" },
+                { kind = "slider", id = "gm_link_ms", label = "Linger", min = 0, max = 500, fmt = "%dms" },
+            },
+        },
+        gmguns = {
+            title = "Macro guns",
+            rows = {
+                { kind = "toggle", id = "gm_rev", label = "Revolver" },
+                { kind = "toggle", id = "gm_db", label = "Double barrel" },
+                { kind = "toggle", id = "gm_tac", label = "Tac shotgun" },
+                { kind = "slider", id = "gm_rev_slot", label = "Revolver slot", min = 1, max = 9, fmt = "%d" },
+                { kind = "slider", id = "gm_db_slot", label = "Double barrel slot", min = 1, max = 9, fmt = "%d" },
+                { kind = "slider", id = "gm_tac_slot", label = "Tac shotgun slot", min = 1, max = 9, fmt = "%d" },
+            },
+        },
+        sticky = {
+            title = "Sticky aim",
+            toggle = "tb_sticky",
+            rows = {
+                { kind = "key", id = "tb_selkey", label = "Select key" },
+                { kind = "key", id = "tb_unselkey", label = "Unselect key" },
+                { kind = "toggle", id = "tb_selvis", label = "Target visuals" },
+                { kind = "toggle", id = "esp_box", label = "Box" },
+                { kind = "toggle", id = "esp_name", label = "Name" },
+                { kind = "toggle", id = "esp_skel", label = "Skeleton" },
+                { kind = "toggle", id = "esp_hp", label = "Health bar" },
+                { kind = "toggle", id = "esp_shield", label = "Shield bar" },
+                { kind = "slider", id = "esp_dist", label = "Max dist", min = 0, max = 2000, fmt = "%d" },
+            },
+        },
+        prediction = {
+            title = "Prediction",
+            toggle = "tb_pred",
+            rows = {
+                { kind = "slider", id = "tb_pred_x", label = "X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_pred_y", label = "Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_pred_smooth", label = "Vel smooth", min = 0.0, max = 0.9, fmt = "%.2f" },
+                { kind = "toggle", id = "tb_dist_pred", label = "Distance based" },
+            },
+        },
+        bands = {
+            title = "Distance bands",
+            rows = {
+                { kind = "slider", id = "tb_close_dist", label = "Close dist", min = 1, max = 150, fmt = "%d" },
+                { kind = "slider", id = "tb_close_x", label = "Close X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_close_y", label = "Close Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_mid_dist", label = "Mid dist", min = 1, max = 300, fmt = "%d" },
+                { kind = "slider", id = "tb_mid_x", label = "Mid X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_mid_y", label = "Mid Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_far_x", label = "Far X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_far_y", label = "Far Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+            },
+        },
+        humanize = {
+            title = "Humanize",
+            toggle = "tb_humanize",
+            rows = {
+                { kind = "slider", id = "tb_delay_min", label = "React min", min = 0, max = 500, fmt = "%dms" },
+                { kind = "slider", id = "tb_delay_max", label = "React max", min = 0, max = 500, fmt = "%dms" },
+                { kind = "slider", id = "tb_int_min", label = "Interval min", min = 0, max = 1000, fmt = "%dms" },
+                { kind = "slider", id = "tb_int_max", label = "Interval max", min = 0, max = 1000, fmt = "%dms" },
+                { kind = "slider", id = "tb_hold_min", label = "Hold min", min = 0, max = 300, fmt = "%dms" },
+                { kind = "slider", id = "tb_hold_max", label = "Hold max", min = 0, max = 300, fmt = "%dms" },
+            },
+        },
+        hesitation = {
+            title = "Hesitation",
+            rows = {
+                { kind = "slider", id = "tb_hes_chance", label = "Chance", min = 0, max = 100, fmt = "%d%%" },
+                { kind = "slider", id = "tb_hes_min", label = "Min", min = 0, max = 2000, fmt = "%dms" },
+                { kind = "slider", id = "tb_hes_max", label = "Max", min = 0, max = 2000, fmt = "%dms" },
+                { kind = "slider", id = "tb_fatigue", label = "Fatigue", min = 0, max = 100, fmt = "%dms" },
+            },
+        },
+        profile = {
+            title = "Profile",
+            rows = {
+                { kind = "text", id = "cfgName", label = "Name" },
+                { kind = "button", action = "cfgCreate", label = "save config" },
+                { kind = "toggle", id = "tb_autoload", label = "Auto load config" },
+                { kind = "key", id = "menuKey", label = "Menu key" },
+            },
+        },
+        saved = {
+            title = "Saved configs",
+            rows = fileRows,
+        },
+    },
+})
+    menu = okNew and m or nil
+    if not menu then warn("[tb] menu init failed: " .. tostring(m)) end
+end
+
+local function refreshFiles()
+    if not menu then return end
+    local list = scanConfigs()
+    for i = 1, FILE_SLOTS do
+        menu.set("cfgFile" .. i, list[i])
+    end
+end
+
+if menu then
+    for i = 1, FILE_SLOTS do
+        local rid = "cfgFile" .. i
+
+        menu.on(rid .. ":load", function(name)
+            if name and loadConfig(name) then
+                CFG.cfgName = name
+                setAutoName(name)
+                menu.redraw()
+            end
+        end)
+
+        menu.on(rid .. ":save", function(name)
+            if not name then return end
+            menu.confirm("overwrite '" .. name .. "'?", function()
+                saveConfig(name)
+                setAutoName(name)
+                refreshFiles()
+            end)
+        end)
+
+        menu.on(rid .. ":del", function(name)
+            if not name then return end
+            menu.confirm("delete '" .. name .. "'?", function()
+                pcall(delfile, cfgPath(name))
+                if getAutoName() == name then setAutoName("") end
+                if CFG.cfgName == name then CFG.cfgName = "config1" end
+                refreshFiles()
+            end)
+        end)
+    end
+
+    menu.on("cfgCreate", function()
+        local n = tostring(CFG.cfgName or ""):gsub("[^%w_%- ]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if #n == 0 then return end
+        CFG.cfgName = n
+        saveConfig(n)
+        setAutoName(n)
+        refreshFiles()
+    end)
+
+    refreshFiles()
+
+    local lastMenuErr = nil
+    local function safeMenu()
+        local ok, e = pcall(menu.step)
+        if not ok and e ~= lastMenuErr then
+            lastMenuErr = e
+            warn("[tb] menu: " .. tostring(e))
+        end
+    end
+
+    local menuHooked = false
+    pcall(function()
+        local rs = game:GetService("RunService")
+        if rs and rs.RenderStepped then
+            rs.RenderStepped:Connect(safeMenu)
+            menuHooked = true
+        end
+    end)
+    if not menuHooked then
+        spawn(function()
+            while true do
+                safeMenu()
+                wait(0.001)
+            end
+        end)
+    end
+else
+    warn("[tb] menu unavailable -- running without it")
+end
