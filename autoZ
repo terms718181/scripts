@@ -1,0 +1,652 @@
+-- Auto Farm Stomp - fake DH (place 138014591158268)
+--
+-- Matcha menu tab "Auto Farm" + a script-owned toggle key (default K).
+--
+-- The enable state lives in the script, NOT in a widget: widget values only
+-- exist once the tab has rendered, so a widget-only toggle silently left the
+-- farm on forever. K is handled by a real InputBegan listener (your own
+-- keyboard reaches the game normally - only synthetic presses are limited),
+-- with an IsKeyDown poll as a backstop.
+--
+--   K                   start / stop (rebindable with the keybind in the tab)
+--   _G.AutoFarm.set(b)  force on/off
+--   _G.AutoFarm.stop()
+--
+-- Measured constraints of this build:
+--   * Synthetic Space(32), Enter(13), Escape(27) reach the game. E, R, digits,
+--     Tab, Shift, Ctrl, Alt and F-keys do NOT.
+--   * Clicks only count with the cursor over the 3D view.
+--   * Knocked = Character.BodyEffects["K.O"].Value, dead = BodyEffects["Dead"].
+--   * Real keys arrive as Roblox KeyCodes (E = 101, K = 107); the menu keybind
+--     speaks VK codes (K = 75). Both spellings are accepted everywhere.
+--   * Matcha clears the whole widget store when the menu re-initialises; ids
+--     then come back nil/0/false. That reset must never be read as "the player
+--     turned the farm off", and one bad widget must not abort the rest.
+--
+-- Auto Stomp: a knocked OR dead player is not skipped. The script snaps on top
+-- of them and fires
+--   ReplicatedStorage.MainRemotes.MainRemoteEvent:FireServer(
+--       "Stomp", {Ignored = {workspace.Ignored}}, nil, Character.BodyEffects)
+-- on the rate slider, immediately - no settle wait, no cooldown learning, no
+-- confirmation window, no E press, no InvokeServer. This is the version that
+-- stomped instantly. Dead bodies count: a player lying there after K.O. is still
+-- stompable, and skipping them is what made the farm go quiet.
+-- The overlay's "stomp landed/fired" is still measured from ProfileStats.Stomps
+-- so you can see the real hit rate; it does not gate anything.
+--
+-- Movement: hovering used to write CFrame every 0.05s, which jittered the camera
+-- and let the body slide out from under you. Anything further than 60 studs is
+-- still one clean snap, but inside that the character is driven by
+-- AssemblyLinearVelocity - a frame-rate-independent spring ("Stick Strength" in
+-- the tab) - so it tracks the body smoothly and stays pinned to it without any
+-- more CFrame writes.
+
+if _G.AutoFarm and _G.AutoFarm.stop then
+    pcall(_G.AutoFarm.stop)
+end
+for _, old in ipairs({ "AutoFarm", "AutoFarm Test", "AutoFarm3", "Auto Farm" }) do
+    pcall(UI.RemoveTab, old)
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local RS = game:GetService("ReplicatedStorage")
+local lp = Players.LocalPlayer
+local stompRemote = RS:FindFirstChild("MainRemotes") and RS.MainRemotes:FindFirstChild("MainRemoteEvent")
+local stompFunc = RS:FindFirstChild("MainRemotes") and RS.MainRemotes:FindFirstChild("MainRemoteFunction")
+
+pcall(setrobloxinput, true)
+
+local DEFAULT = { hover = 3, fire = 130, range = 5000, gun = 0, stomp = 150, stick = 14 }
+local STICK_MAX = 600                   -- velocity cap for the stick spring
+
+local function ui(id, fallback)
+    local ok, v = pcall(UI.GetValue, id)
+    if ok and v ~= nil then return v end
+    return fallback
+end
+
+local running = true
+local enabled = true
+local status = "starting"
+local target = nil
+local shots = 0
+local stompFires = 0
+local stompLanded = 0
+local lastStomp = 0
+local stompMiss = 0
+local STOMP_MARGIN = 1.2                -- pace this much slower than the learned cooldown
+local settleTime = 0.08
+local cooldown = 0.15                   -- learned server stomp cooldown, seconds
+local lastCreditAt = 0
+local tabError = nil
+local loopError = nil
+local kbWidget = nil
+local toggleKey = 0x4B                  -- K
+local lastTogglePress = 0
+local ignoreToggleUntil = 0
+local lastSeenToggle = nil
+local downLatch = nil
+local lastFire, lastAim, lastTele, lastKillAt = 0, 0, 0, nil
+local tabReady, tabReadyAt = false, 0
+local wasReady = false
+local lastPushBack = 0
+
+-- ------------------------------------------------------------------ enable state
+local S = {
+    on = true, hover = DEFAULT.hover, fire = DEFAULT.fire / 1000,
+    range = DEFAULT.range, gun = "Auto", aim = true, tp = true, overlay = true,
+    stomp = true, stompRate = DEFAULT.stomp / 1000, stickK = DEFAULT.stick,
+}
+
+-- fromUI = true when the panel toggle changed it, so we do not write it back
+local function setEnabled(v, fromUI)
+    enabled = v and true or false
+    S.on = enabled
+    lastSeenToggle = enabled
+    if not fromUI then
+        ignoreToggleUntil = tick() + 0.4
+        pcall(UI.SetValue, "af_on", enabled)
+    end
+end
+
+-- Real keys arrive as Roblox KeyCodes (K = 107), the menu keybind speaks VK
+-- codes (K = 75), and IsKeyDown only takes the Roblox number. Bridge all three.
+local function keyMatches(num, target)
+    if not num or not target then return false end
+    if num == target then return true end
+    if target >= 65 and target <= 90 and num == target + 32 then return true end
+    if target >= 97 and target <= 122 and num == target - 32 then return true end
+    return false
+end
+
+local function keyDown(target)
+    local function one(c)
+        local ok, d = pcall(function() return UIS:IsKeyDown(c) end)
+        return ok and d == true
+    end
+    if one(target) then return true end
+    if target >= 65 and target <= 90 and one(target + 32) then return true end
+    if target >= 97 and target <= 122 and one(target - 32) then return true end
+    return false
+end
+
+-- ------------------------------------------------------------------ stomp stats
+-- Stomps as the server counts them; the difference from stompBase is what the
+-- remote actually earned, which is the only trustworthy progress readout.
+local function creditedStomps()
+    local ps = lp:FindFirstChild("ProfileStats")
+    local v = ps and ps:FindFirstChild("Stomps")
+    if v and type(v.Value) == "number" then return v.Value end
+    return 0
+end
+local stompBase = creditedStomps()
+
+-- How long to hold still after a snap before firing. Firing in the same frame
+-- as the teleport is what makes a stomp miss: the server validates against its
+-- own copy of your position, which trails yours by a ping.
+task.spawn(function()
+    while running do
+        local ok, p = pcall(GetPingValue)
+        if ok and tonumber(p) then
+            local secs = tonumber(p)
+            if secs > 5 then secs = secs / 1000 end
+            settleTime = math.min(math.max(secs * 1.5, 0.05), 0.4)
+        end
+        task.wait(3)
+    end
+end)
+
+-- ------------------------------------------------------------------ weapon list
+local gunList = { "Auto" }
+local gunSig = "Auto"
+local function refreshGuns()
+    local seen = { Auto = true }
+    local out = { "Auto" }
+    local function scan(parent)
+        if not parent then return end
+        local ok, kids = pcall(function() return parent:GetChildren() end)
+        if not ok or not kids then return end
+        for _, v in ipairs(kids) do
+            if v.ClassName == "Tool" and not seen[v.Name] then
+                seen[v.Name] = true
+                out[#out + 1] = v.Name
+            end
+        end
+    end
+    scan(lp.Character)
+    scan(lp:FindFirstChild("Backpack"))
+    table.sort(out, function(a, b)
+        if a == "Auto" then return true end
+        if b == "Auto" then return false end
+        return a < b
+    end)
+    gunList = out
+    gunSig = table.concat(out, "\0")
+end
+refreshGuns()
+
+local function equippedGun()
+    local ch = lp.Character
+    if not ch then return nil end
+    for _, v in ipairs(ch:GetChildren()) do
+        if v.ClassName == "Tool" then
+            local a = v:FindFirstChild("Ammo")
+            if a and type(a.Value) == "number" then return v, a end
+        end
+    end
+    return nil
+end
+
+-- ------------------------------------------------------------------ live settings
+local function pollSettings()
+    S.hover = tonumber(ui("af_hover", DEFAULT.hover)) or DEFAULT.hover
+    S.fire = (tonumber(ui("af_fire", DEFAULT.fire)) or DEFAULT.fire) / 1000
+    S.range = tonumber(ui("af_range", DEFAULT.range)) or DEFAULT.range
+    local gi = tonumber(ui("af_gun", DEFAULT.gun)) or 0
+    S.gun = gunList[gi + 1] or "Auto"
+    S.stomp = (ui("af_stomp", true) == true)
+    S.stompRate = (tonumber(ui("af_stomp_rate", DEFAULT.stomp)) or DEFAULT.stomp) / 1000
+    S.stickK = tonumber(ui("af_stick", DEFAULT.stick)) or DEFAULT.stick
+    S.on = enabled
+end
+pollSettings()
+
+-- ------------------------------------------------------------------- target logic
+local function pickTarget()
+    local ch = lp.Character
+    local myRoot = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+    local myPos = myRoot.Position
+    local best, bestD = nil, S.range
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= lp then
+            local tc = p.Character
+            local root = tc and tc:FindFirstChild("HumanoidRootPart")
+            local hum = tc and tc:FindFirstChild("Humanoid")
+            if root and hum then
+                local be = tc:FindFirstChild("BodyEffects")
+                -- Dead bodies are included on purpose: a player lying there after
+                -- the K.O. window still gets stomped and still pays, and that is
+                -- the state most targets are in once the fight is over.
+                local d = (root.Position - myPos).Magnitude
+                if d < bestD then
+                    bestD = d
+                    best = {
+                        plr = p, char = tc, root = root, hum = hum,
+                        head = tc:FindFirstChild("Head") or root,
+                        ko = be and be:FindFirstChild("K.O"),
+                        dead = be and be:FindFirstChild("Dead"),
+                    }
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function isGone(t)
+    if not t then return true end
+    if not t.char or not t.char.Parent then return true end
+    -- Health 0 and Dead are NOT "gone": the body stays stompable until the
+    -- player respawns, which replaces the character and trips the check above.
+    return false
+end
+
+local function isKnocked(t)
+    return t and t.ko and t.ko.Value == true
+end
+
+-- Stompable = downed OR dead. Dead bodies are not skipped: a player who fell out
+-- of K.O. into Dead still lies there and is still stompable, and dropping them is
+-- what made the farm go quiet the moment a target finished dying.
+local function isStompable(t)
+    if not t then return false end
+    if t.ko and t.ko.Value == true then return true end
+    if t.dead and t.dead.Value == true then return true end
+    return false
+end
+
+task.spawn(function()
+    while running do
+        pcall(refreshGuns)
+        pcall(pollSettings)
+        task.wait(2)
+    end
+end)
+
+task.spawn(function()
+    while running do
+        local ok, err = pcall(function()
+            if target and isGone(target) then
+                lastKillAt = tick()
+                target = nil
+            end
+            if not target and (not lastKillAt or tick() - lastKillAt >= 0.8) then
+                target = pickTarget()
+            end
+        end)
+        if not ok then loopError = "target: " .. tostring(err) end
+        task.wait(0.15)
+    end
+end)
+
+-- Mirrors the panel toggle and keeps the rebindable key in sync.
+task.spawn(function()
+    while running do
+        -- The tab builder only runs while the tab is on screen; closing the menu
+        -- resets the widget store and that reset looks exactly like an unticked
+        -- box. Track panel health so a reset is never read as a click.
+        local readyNow = tabReady and (tick() - tabReadyAt) <= 1.5
+        if readyNow ~= wasReady then
+            wasReady = readyNow
+            lastSeenToggle = enabled
+            ignoreToggleUntil = tick() + 0.8
+            if not readyNow then pcall(UI.SetValue, "af_on", enabled) end
+        end
+
+        local v = ui("af_on", nil)
+        if v ~= nil then
+            if tick() < ignoreToggleUntil then
+                lastSeenToggle = v          -- swallow the write we just made
+                -- and make the box show the truth again if the store drifted
+                if v ~= enabled then pcall(UI.SetValue, "af_on", enabled) end
+            elseif not readyNow then
+                -- Panel is not drawing right now: whatever the store holds is a
+                -- reset artefact, not a click. Keep the script state and push it
+                -- back so the toggle shows the truth when the panel returns.
+                lastSeenToggle = enabled
+                if v ~= enabled and tick() - lastPushBack > 0.5 then
+                    lastPushBack = tick()
+                    pcall(UI.SetValue, "af_on", enabled)
+                end
+            elseif lastSeenToggle == nil then
+                lastSeenToggle = v
+                if v ~= enabled then setEnabled(v, true) end
+            elseif v ~= lastSeenToggle then
+                setEnabled(v, true)
+            end
+        end
+        if kbWidget then
+            local ok, k = pcall(function() return kbWidget:GetKey() end)
+            if ok and k ~= nil then
+                local vk = (type(k) == "number") and k or nil
+                if not vk then
+                    local okv, kv = pcall(function() return k.Value end)
+                    if okv and type(kv) == "number" then vk = kv end
+                end
+                if vk and vk > 0 then toggleKey = vk end
+            end
+        end
+
+        -- Second path: poll the key directly in case a press never reaches
+        -- InputBegan. The first sample only calibrates the latch. Both paths
+        -- share lastTogglePress, so one press can never toggle twice.
+        local down = keyDown(toggleKey)
+        if downLatch == nil then
+            downLatch = down
+        elseif down and not downLatch and tick() - lastTogglePress >= 0.35 then
+            lastTogglePress = tick()
+            setEnabled(not enabled, false)
+        end
+        downLatch = down
+        task.wait(0.1)
+    end
+end)
+
+-- The toggle key itself. Your physical keyboard is not limited: only synthetic
+-- presses are, so this listener always fires.
+local keyConn
+keyConn = UIS.InputBegan:Connect(function(input)
+    if not running then return end
+    local k = input and input.KeyCode
+    if k == nil then return end
+    local num = (type(k) == "number") and k or nil
+    if not num then
+        local ok, kv = pcall(function() return k.Value end)
+        if ok and type(kv) == "number" then num = kv end
+    end
+    if not keyMatches(num, toggleKey) then return end
+    if tick() - lastTogglePress < 0.35 then return end
+    lastTogglePress = tick()
+    setEnabled(not enabled, false)
+end)
+
+-- ------------------------------------------------------------------------- aim
+local aimConn
+aimConn = RunService.RenderStepped:Connect(function()
+    if not running or not S.on or not S.aim then return end
+    local now = tick()
+    if now - lastAim < 0.05 then return end
+    lastAim = now
+    local t = target
+    if not t then return end
+    local ok, err = pcall(function()
+        local pt, vis = WorldToScreen(t.head.Position)
+        if vis then mousemoveabs(math.floor(pt.X), math.floor(pt.Y)) end
+    end)
+    if not ok then loopError = "aim: " .. tostring(err) end
+end)
+
+-- ------------------------------------------------------------------- main loop
+local mainConn
+mainConn = RunService.Heartbeat:Connect(function(dt)
+    if not running then return end
+    if not S.on then
+        status = "off"
+        return
+    end
+    local step = math.min(dt or (1 / 60), 0.05)
+    local okRun, err = pcall(function()
+        local now = tick()
+        local ch = lp.Character
+        local myRoot = ch and ch:FindFirstChild("HumanoidRootPart")
+        local hum = ch and ch:FindFirstChild("Humanoid")
+        if not myRoot or not hum or hum.Health <= 0 then
+            status = "waiting for respawn"
+            return
+        end
+
+        local t = target
+        if not t or isGone(t) then
+            status = "no target"
+            return
+        end
+
+        if S.tp then
+            local tp = t.root.Position
+            local goal = Vector3.new(tp.X, tp.Y + S.hover, tp.Z)
+            local cur = myRoot.Position
+            local delta = goal - cur
+            local dist = delta.Magnitude
+
+            if dist > 60 then
+                -- Long approach: one snap, then the glide takes over.
+                if now - lastTele >= 0.05 then
+                    lastTele = now
+                    local flat = Vector3.new(tp.X - goal.X, 0, tp.Z - goal.Z)
+                    if flat.Magnitude < 0.5 then flat = Vector3.new(1, 0, 0) end
+                    myRoot.CFrame = CFrame.lookAt(goal, goal + flat)
+                    myRoot.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                end
+            else
+                -- Glide. AssemblyLinearVelocity is useless here (measured: the
+                -- Humanoid's mover overwrites it, 0.7 studs of travel in 0.8s),
+                -- so the position is written directly - but only a fraction of
+                -- the remaining gap per frame, with our own facing preserved.
+                -- That removes the 8-stud snap that made hovering look glitchy.
+                local alpha = 1 - math.exp(-S.stickK * step)
+                local maxStep = math.min(S.stickK * step * 14, STICK_MAX * step)
+                if maxStep < 0.4 then maxStep = 0.4 end
+                local move = delta * alpha
+                if move.Magnitude > maxStep then move = move.Unit * maxStep end
+                local nextPos = cur + move
+                local look = myRoot.CFrame * Vector3.new(0, 0, -1)
+                local flat = look - myRoot.Position
+                if flat.Magnitude < 0.01 then flat = Vector3.new(0, 0, -1) end
+                myRoot.CFrame = CFrame.lookAt(nextPos, nextPos + flat)
+                myRoot.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            end
+        end
+
+        if isStompable(t) then
+            if not S.stomp then
+                status = "knocked " .. t.plr.Name
+                return
+            end
+            if not stompRemote then
+                loopError = "no MainRemoteEvent"
+                return
+            end
+
+            -- Instant stomp: fire the remote as soon as the rate allows. The
+            -- landed counter is measured after the fact and gates nothing.
+            if now - lastStomp >= S.stompRate then
+                lastStomp = now
+                stompFires = stompFires + 1
+                local before = creditedStomps()
+                local be = ch:FindFirstChild("BodyEffects")
+                local ign = workspace:FindFirstChild("Ignored")
+                pcall(function()
+                    stompRemote:FireServer("Stomp", { Ignored = ign and { ign } or {} }, nil, be)
+                end)
+                task.delay(0.5, function()
+                    if creditedStomps() > before then stompLanded = stompLanded + 1 end
+                end)
+                status = "stomping " .. t.plr.Name
+            end
+            return
+        end
+
+        local gun, ammo = equippedGun()
+        local count = ammo and ammo.Value or nil
+
+        if S.gun ~= "Auto" and (not gun or gun.Name ~= S.gun) then
+            status = "equip " .. S.gun .. " yourself"
+            return
+        end
+        if count and count <= 0 then
+            status = "out of ammo (press R)"
+            return
+        end
+        if now - lastFire >= S.fire then
+            lastFire = now
+            pcall(mouse1click)
+            shots = shots + 1
+        end
+        status = "shooting " .. t.plr.Name ..
+            (gun and ("  [" .. (count or "?") .. " " .. gun.Name .. "]") or "  [fists]")
+    end)
+    if not okRun then loopError = "main: " .. tostring(err) end
+end)
+
+-- --------------------------------------------------------------- status overlay
+local label = Drawing.new("Text")
+label.Size = 14
+label.Outline = true
+label.Center = true
+label.Position = Vector2.new(960, 26)
+label.Color = Color3.fromRGB(120, 255, 150)
+
+local lastBeat = 0
+task.spawn(function()
+    while running do
+        local t = target
+        local dist = "?"
+        if t then
+            local ch = lp.Character
+            local myRoot = ch and ch:FindFirstChild("HumanoidRootPart")
+            if myRoot then
+                dist = tostring(math.floor((t.root.Position - myRoot.Position).Magnitude + 0.5))
+            end
+        end
+        local keyName = "K"
+        if kbWidget then
+            local ok, n = pcall(function() return kbWidget:GetKeyName() end)
+            if ok and type(n) == "string" and n ~= "" then keyName = n end
+        end
+        local extra = tabError and ("  |  UI: " .. tabError)
+            or (loopError and ("  |  err: " .. loopError) or "")
+        local credited = creditedStomps() - stompBase
+        label.Text = "AutoFarm [" .. keyName .. "]: " .. status ..
+            "  |  shots " .. shots ..
+            (S.stomp and ("  |  stomp " .. stompLanded .. "/" .. stompFires ..
+                "  (+" .. credited .. ")") or "") ..
+            (t and ("  |  " .. dist .. " studs") or "") .. extra
+        label.Visible = S.overlay
+
+        -- Liveness trace: an executor re-init can kill this script without any
+        -- error anywhere, so leave a timestamp on disk for post-mortems.
+        if tick() - lastBeat > 5 then
+            lastBeat = tick()
+            pcall(writefile, "af_state.txt", table.concat({
+                "tick=" .. string.format("%.1f", tick()),
+                "on=" .. tostring(enabled),
+                "tabReady=" .. tostring(tabReady),
+                "state=" .. status,
+                "shots=" .. shots,
+                "stomps=" .. stompFires,
+                "target=" .. (target and target.plr.Name or "-"),
+            }, " "))
+        end
+
+        task.wait(0.2)
+    end
+end)
+
+-- ------------------------------------------------------------------- menu tab
+-- Matcha can reset its widget store (menu re-init) and can start rejecting a
+-- single widget. Each call below is isolated so one bad widget cannot stop the
+-- section from drawing, and tabReady tells the mirror loop whether the panel is
+-- currently trustworthy.
+local lastBuiltSig = nil
+local comboBadSig = nil
+
+local function buildTab()
+    UI.AddTab("Auto Farm", function(tab)
+        local firstError = nil
+        local function attempt(label, fn)
+            local ok, res = pcall(fn)
+            if ok then return res end
+            if not firstError then
+                firstError = label .. ": " .. tostring(res)
+                print("AutoFarm tab: " .. firstError)
+            end
+            return nil
+        end
+
+        local farm = attempt("section", function() return tab:Section("Farm", "Left") end)
+        if not farm then
+            tabReady, tabError = false, firstError
+            return
+        end
+
+        attempt("toggle", function() farm:Toggle("af_on", "Auto Farm", enabled) end)
+
+        local kb = attempt("keybind", function() return farm:Keybind("af_kb", 0x4B, "toggle") end)
+        if kb then
+            kbWidget = kb
+            if kb.AddToHotkey then
+                attempt("hotkey", function() kb:AddToHotkey("Auto Farm", "af_on") end)
+            end
+        end
+
+        local gotSig = gunSig
+        local rebuild = (gotSig ~= lastBuiltSig) and (gotSig ~= comboBadSig)
+        local combo = attempt("combo", function()
+            local c = farm:Combo("af_gun", "Weapon", gunList, DEFAULT.gun)
+            if rebuild then
+                c:Clear()
+                for _, name in ipairs(gunList) do c:Add(name) end
+            end
+            return c
+        end)
+        if combo then
+            lastBuiltSig = gotSig
+        elseif rebuild then
+            comboBadSig = gotSig            -- stop retrying a list the UI rejects
+        end
+
+        attempt("tip", function() farm:Tip("Auto = whatever gun is in your hand") end)
+
+        attempt("stomp", function() farm:Toggle("af_stomp", "Auto Stomp (remote)", S.stomp) end)
+        attempt("stomprate", function() farm:SliderInt("af_stomp_rate", "Stomp Rate (ms)", 60, 1000, DEFAULT.stomp) end)
+        attempt("stick", function() farm:SliderInt("af_stick", "Stick Strength", 4, 40, DEFAULT.stick) end)
+
+        attempt("hover", function() farm:SliderInt("af_hover", "Stand Height", 1, 10, DEFAULT.hover) end)
+        attempt("fire", function() farm:SliderInt("af_fire", "Fire Rate (ms)", 50, 500, DEFAULT.fire) end)
+        attempt("range", function() farm:SliderInt("af_range", "Max Distance", 50, 20000, DEFAULT.range) end)
+
+        tabReady = true
+        tabReadyAt = tick()
+        tabError = firstError
+    end)
+end
+buildTab()
+
+_G.AutoFarm = {
+    cfg = S,
+    set = function(v) setEnabled(v, false) end,
+    stomp = function(v)
+        S.stomp = v and true or false
+        pcall(UI.SetValue, "af_stomp", S.stomp)
+    end,
+    status = function()
+        local gun, ammo = equippedGun()
+        return S.on, status, target and target.plr.Name or "-", shots,
+            gun and gun.Name or "-", ammo and ammo.Value or -1,                S.gun, tabError, toggleKey, loopError,
+                stompFires, creditedStomps() - stompBase, stompMiss, settleTime, cooldown, stompLanded
+    end,
+    stop = function()
+        running = false
+        if mainConn then mainConn:Disconnect() mainConn = nil end
+        if aimConn then aimConn:Disconnect() aimConn = nil end
+        if keyConn then keyConn:Disconnect() keyConn = nil end
+        if label then label:Remove() label = nil end
+        pcall(UI.RemoveTab, "Auto Farm")
+        _G.AutoFarm = nil
+    end,
+}
+
+print("Auto Farm loaded - K toggles, auto stomp on, _G.AutoFarm.stop() stops")
