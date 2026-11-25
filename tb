@@ -73,6 +73,10 @@ local CFG = {
     gm_rev_slot = 1,
     gm_db_slot = 2,
     gm_tac_slot = 3,
+
+    -- menu bind lives in the config table so a saved config can restore it;
+    -- it has to be declared here (before autoload runs) or loadConfig skips it
+    menuKey = 0x08,
 }
 
 local function v(id)
@@ -1779,12 +1783,17 @@ end
 local function loadConfig(name)
     local ok, raw = pcall(readfile, cfgPath(name))
     if not ok or type(raw) ~= "string" then return false end
+    local keyLoaded = false
     for line in raw:gmatch("[^\r\n]+") do
         local k, val = line:match("^([%w_]+)=(.*)$")
         if k and CFG[k] ~= nil then
             local n = tonumber(val)
             if n then
-                CFG[k] = n
+                -- the bind has to stay usable: 0 would leave the menu unopenable
+                if k ~= "menuKey" or (n > 0 and n <= 255) then
+                    CFG[k] = n
+                    if k == "menuKey" then keyLoaded = true end
+                end
             elseif val == "true" then
                 CFG[k] = true
             elseif val == "false" then
@@ -1795,6 +1804,8 @@ local function loadConfig(name)
             end
         end
     end
+    -- the shown key name is menu-only state, so rebuild it from the loaded code
+    if keyLoaded then CFG.menuKeyName = nil end
     return true
 end
 
@@ -2637,20 +2648,41 @@ function MenuLib.new(config)
         end
 
         if confirmBox then
-            local bw, bh = 260, 78
+            -- the yes fill sits above the panel; a tie on the panel's z-index
+            -- left the button looking uncoloured
+            local msg = tostring(confirmBox.text)
+            local bh = 92
+            local bw = approxW(msg, 11) + 40
+            if bw < 260 then bw = 260 end
+            if bw > w - 60 then bw = w - 60 end
             local bx = x + (w - bw) / 2
             local by = y + (h - bh) / 2
+            -- panel with a header strip, so it reads as its own surface
             pq(bx, by, bw, bh, T.win, 13)
             stroke(bx, by, bw, bh, T.winBorder, 13)
-            tx(bx + 12, by + 14, confirmBox.text, 11, T.text, false, 14)
-            local yw, yh = 66, 18
-            local yx, yy = bx + 12, by + bh - 32
-            pq(yx, yy, yw, yh, T.accent, 13)
-            tx(yx + yw / 2, yy + 3, "yes", 10, T.knob, true, 14)
-            local nx = bx + bw - yw - 12
-            pq(nx, yy, yw, yh, T.field, 13)
-            stroke(nx, yy, yw, yh, T.fieldBorder, 13)
-            tx(nx + yw / 2, yy + 3, "no", 10, T.text, true, 14)
+            pq(bx + 1, by + 1, bw - 2, 24, T.header, 13)
+            pq(bx + 1, by + 25, bw - 2, 1, T.cardBorder, 13)
+            tx(bx + 12, by + 5, "CONFIRM", 10, T.mute, false, 14)
+            -- long config names get an ellipsis instead of running off the panel
+            local fit = msg
+            local room = bw - 28
+            if approxW(fit, 11) > room then
+                while #fit > 4 and approxW(fit .. "...", 11) > room do
+                    fit = fit:sub(1, -2)
+                end
+                fit = fit .. "..."
+            end
+            tx(bx + bw / 2, by + 40, fit, 11, T.text, true, 14)
+            local yw, yh = 78, 20
+            local yy = by + bh - yh - 14
+            local nx = bx + bw - 14 - yw
+            local yx = nx - 10 - yw
+            pq(yx, yy, yw, yh, T.accent, 14)
+            stroke(yx, yy, yw, yh, T.accent, 14)
+            pq(nx, yy, yw, yh, T.field, 14)
+            stroke(nx, yy, yw, yh, T.fieldBorder, 14)
+            tx(yx + yw / 2, yy + 4, "yes", 10, T.text, true, 15)
+            tx(nx + yw / 2, yy + 4, "no", 10, T.text, true, 15)
             HITS[#HITS + 1] = { x = yx, y = yy, w = yw, h = yh, kind = "confirmyes" }
             HITS[#HITS + 1] = { x = nx, y = yy, w = yw, h = yh, kind = "confirmno" }
         end
