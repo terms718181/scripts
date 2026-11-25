@@ -63,9 +63,7 @@ local CFG = {
     gm_key = 0x46,
     gm_mode = "toggle",
     gm_delay = 60,
-    gm_method = "keys",
     gm_link = false,
-    gm_link_ms = 0,
     gm_ammo = true,
     gm_dist_on = false, -- only spam guns whose own range reaches the nearest enemy
     gm_drop = false,
@@ -1015,10 +1013,7 @@ local function gmActive()
     if not cfg("gm_on") then return false end
     if cfg("gm_link") then
         -- linked: only while the trigger has a target under the crosshair.
-        -- a linger above 0 keeps the spam alive briefly after it disengages.
         if tbEngaged then return true end
-        local linger = (tonumber(cfg("gm_link_ms")) or 0) / 1000
-        if linger > 0 and (tick() - lastFireAt) <= linger then return true end
         -- the key works while linked too, because the trigger returns before it
         -- ever engages with a knife in hand, and cannot see past the gun's own
         -- check. it only counts at a player the crosshair is on: the macro is
@@ -1707,11 +1702,7 @@ local function gmStep()
     local delay = (tonumber(cfg("gm_delay")) or 60) / 1000
     gmNext = now + math.max(delay, 0.01)
 
-    if cfg("gm_method") == "equip" then
-        gmStepEquip()
-    else
-        gmStepKeys()
-    end
+    gmStepKeys()
 end
 
 local function gmStepSafe()
@@ -1798,7 +1789,7 @@ local function loadConfig(name)
                 CFG[k] = true
             elseif val == "false" then
                 CFG[k] = false
-            elseif k == "tb_kbmode" or k == "gm_mode" or k == "gm_method" then
+            elseif k == "tb_kbmode" or k == "gm_mode" then
                 -- string settings: numbers and booleans cannot carry them
                 CFG[k] = val
             end
@@ -1985,35 +1976,35 @@ MenuLib.version = "1.0"
 
 -- Palette. Override any key with config.theme = { accent = ... }.
 MenuLib.theme = {
-    win = Color3.fromRGB(10, 10, 12),
-    winBorder = Color3.fromRGB(38, 38, 44),
-    side = Color3.fromRGB(12, 12, 14),
-    line = Color3.fromRGB(26, 26, 31),
-    top = Color3.fromRGB(14, 14, 17),
-    card = Color3.fromRGB(16, 16, 20),
-    cardBorder = Color3.fromRGB(36, 36, 42),
-    header = Color3.fromRGB(20, 20, 24),
-    accent = Color3.fromRGB(255, 58, 116),
-    text = Color3.fromRGB(234, 234, 240),
-    dim = Color3.fromRGB(178, 178, 186),
-    mute = Color3.fromRGB(126, 126, 136),
-    track = Color3.fromRGB(32, 32, 38),
-    knob = Color3.fromRGB(8, 8, 10),
-    titleText = Color3.fromRGB(196, 196, 204),
-    field = Color3.fromRGB(21, 21, 26),
-    fieldBorder = Color3.fromRGB(40, 40, 47),
-    box = Color3.fromRGB(19, 19, 23),
-    boxBorder = Color3.fromRGB(46, 46, 54),
-    hot = Color3.fromRGB(255, 58, 116),
-    hi = Color3.fromRGB(30, 30, 36),
-    edge = Color3.fromRGB(48, 48, 56),
-    handle = Color3.fromRGB(232, 232, 238),
+    win = Color3.fromRGB(24, 27, 32),
+    winBorder = Color3.fromRGB(74, 112, 120),
+    side = Color3.fromRGB(19, 22, 27),
+    line = Color3.fromRGB(44, 48, 55),
+    top = Color3.fromRGB(24, 27, 32),
+    card = Color3.fromRGB(24, 27, 32),
+    cardBorder = Color3.fromRGB(64, 68, 76),
+    header = Color3.fromRGB(29, 32, 38),
+    accent = Color3.fromRGB(60, 158, 170),
+    text = Color3.fromRGB(236, 240, 246),
+    dim = Color3.fromRGB(205, 210, 217),
+    mute = Color3.fromRGB(138, 144, 153),
+    track = Color3.fromRGB(58, 62, 69),
+    knob = Color3.fromRGB(18, 20, 24),
+    titleText = Color3.fromRGB(226, 230, 236),
+    field = Color3.fromRGB(32, 35, 41),
+    fieldBorder = Color3.fromRGB(84, 88, 96),
+    box = Color3.fromRGB(32, 35, 41),
+    boxBorder = Color3.fromRGB(92, 96, 104),
+    hot = Color3.fromRGB(60, 158, 170),
+    hi = Color3.fromRGB(34, 38, 44),
+    edge = Color3.fromRGB(48, 52, 59),
+    handle = Color3.fromRGB(186, 192, 199),
 }
 
--- SystemBold is the closest thing this VM has to a cheat-menu label face:
--- narrow, flat, and legible at 10-11px. Override with config.font.
+-- Back to the rounded face this menu had before. Swap for SystemBold,
+-- Monospace or UI here for a different look - nothing else depends on it.
 local FONT = 11
-pcall(function() FONT = Drawing.Fonts.SystemBold end)
+pcall(function() FONT = Drawing.Fonts.ProximaSoftBold or Drawing.Fonts.System or 11 end)
 
 -- Keycodes offered while rebinding, with their display names.
 local KEY_NAMES = {
@@ -2138,14 +2129,13 @@ function MenuLib.new(config)
     local title = config.title or "MENU"
     local listeners = {}
 
-    local TOPBAR = 26   -- title strip; dragging it moves the window
-    local TABBAR = 26   -- primary tab row
-    local SUBBAR = 22   -- secondary tab row
-    local SIDEBAR = config.sidebar or 0
-    local PADX = 10
-    local PADB = 26   -- breathing room under the last card
-    local CARD_HDR = 16
-    local ROW_H = 20
+    local TOPBAR = 28   -- caption strip; dragging it moves the window
+    local TABBAR = 30   -- tab strip across the content column
+    local SIDEBAR = config.sidebar or 112
+    local PADX = 12
+    local PADB = 14   -- breathing room under the last card
+    local CARD_HDR = 26
+    local ROW_H = 24
 
     local M = {
         open = config.open ~= false,
@@ -2166,6 +2156,7 @@ function MenuLib.new(config)
     local listeningId = nil -- bind row waiting for the user to press a key
     local editing = nil     -- { id, buf, numeric, min, max, fmt, prev }
     local confirmBox = nil  -- { text, onYes }
+    local dropdown = nil    -- open option list: { id, options, fx, fy, fw, fh }
     local destroyed = false
 
     local dragging, dragOffX, dragOffY = false, 0, 0
@@ -2210,6 +2201,37 @@ function MenuLib.new(config)
         t.Visible = false
         pcall(function() t.Font = FONT end)
         TX_POOL[i] = t
+    end
+
+    -- Filled triangles, for dropdown arrows.
+    local TRI = {}
+    local triN = 0
+    for i = 1, (poolCfg.tri or 40) do
+        local tr = Drawing.new("Triangle")
+        tr.Color = T.mute
+        tr.Filled = true
+        tr.Thickness = 1
+        tr.ZIndex = 12
+        tr.Visible = false
+        TRI[i] = tr
+    end
+
+    local function tri(ax, ay, bx, by, cx, cy, color, z)
+        triN = triN + 1
+        local tr = TRI[triN]
+        if not tr then
+            tr = Drawing.new("Triangle")
+            tr.Filled = true
+            tr.Thickness = 1
+            TRI[triN] = tr
+        end
+        tr.PointA = Vector2.new(ax, ay)
+        tr.PointB = Vector2.new(bx, by)
+        tr.PointC = Vector2.new(cx, cy)
+        tr.Color = color
+        tr.ZIndex = z or 12
+        tr.Visible = true
+        return tr
     end
 
     local function rq(x, y, w, h, color, z)
@@ -2303,24 +2325,42 @@ function MenuLib.new(config)
     -- ---------------------------------------------------------------
     local function rowHeight(row)
         local k = row.kind
-        if k == "cycle" or k == "text" then return 30 end
-        if k == "slider" or k == "button" then return 24 end
-        if k == "note" then return 16 end
-        return 20
+        if k == "cycle" or k == "text" then return 36 end
+        if k == "slider" then return 32 end
+        if k == "button" then return 26 end
+        if k == "note" then return 18 end
+        return 24
     end
 
     local function cardHeight(card)
-        local h = 8 + CARD_HDR + 6
+        local h = 8 + CARD_HDR + 10
         for _, row in ipairs(card.rows or {}) do
             h = h + rowHeight(row)
         end
         return h
     end
 
-    -- Text width is not known to us, so titles are measured crudely; close
-    -- enough to size the notch that interrupts the box's top border.
+    -- Real glyph widths, straight from the VM. The old 0.52-per-pixel guess
+    -- ran about 20% narrow, which is what made tab labels, key hints and card
+    -- titles collide with whatever sat next to them.
+    local MEAS = Drawing.new("Text")
+    MEAS.Visible = false
+    MEAS.Outline = false
+    pcall(function() MEAS.Font = FONT end)
+
     local function approxW(s, size)
-        return #s * (size * 0.52) + 6
+        s = tostring(s)
+        local ok = pcall(function()
+            MEAS.Size = size
+            MEAS.Text = s
+        end)
+        if ok then
+            local okb, b = pcall(function() return MEAS.TextBounds end)
+            -- TextBounds reports one fixed metric regardless of face, and the
+            -- rounded face runs a shade wider than that, so keep some air.
+            if okb and b and b.X and b.X > 0 then return b.X * 1.15 end
+        end
+        return #s * (size * 0.74) + 4
     end
 
     local function drawCard(id, x, y, w)
@@ -2330,37 +2370,34 @@ function MenuLib.new(config)
         local h = cardHeight(card)
         local by0 = y + 8
 
+        -- Flat panel, hairline border, washed header strip with a rule under it.
         pq(x, by0, w, h - 8, T.card, 10)
-        stroke(x, by0, w, h - 8, T.cardBorder, 10)
-        pq(x + 1, by0 + 1, w - 2, 1, T.edge, 10)
-        if card.toggle and values[card.toggle] == true then
-            pq(x, by0 + 1, 2, h - 10, T.accent, 11)
-        end
+        pq(x + 1, by0 + 1, w - 2, CARD_HDR - 1, T.header, 10)
+        stroke(x, by0, w, h - 8, T.cardBorder, 11)
+        pq(x + 1, by0 + CARD_HDR, w - 2, 1, T.line, 11)
 
         local label = card.title or id
-        local lw = approxW(label, 10)
-        tx(x + 14, by0 - 5, label, 10, T.mute, false, 12)
-        pq(x + 12, by0, lw + 6, 2, T.win, 11)
+        tx(x + 14, by0 + 7, label, 11, T.text, false, 12)
 
         if card.toggle then
             local on = values[card.toggle] == true
-            local pw, ph = 18, 9
-            local px, py = x + w - pw - 10, by0 + 4
-            rq(px, py, pw, ph, on and T.accent or T.track, 12)
-            rq(on and (px + pw - ph + 1) or (px + 1), py + 1, ph - 2, ph - 2, T.knob, 13)
-            HITS[#HITS + 1] = { x = px - 4, y = py - 4, w = pw + 8, h = ph + 8, kind = "toggle", id = card.toggle }
+            local bx, byy = x + w - 24, by0 + 8
+            pq(bx, byy, 10, 10, on and T.accent or T.box, 12)
+            stroke(bx, byy, 10, 10, on and T.accent or T.boxBorder, 12)
+            if on then pq(x + 1, by0 + 1, 2, h - 10, T.accent, 11) end
+            HITS[#HITS + 1] = { x = bx - 6, y = byy - 5, w = 22, h = 20, kind = "toggle", id = card.toggle }
         end
 
-        local ix = x + 10
-        local iw = w - 20
-        local ry = by0 + CARD_HDR
+        local ix = x + 14
+        local iw = w - 28
+        local ry = by0 + CARD_HDR + 4
         for _, row in ipairs(rows) do
             if row.kind == "toggle" then
                 local on = values[row.id] == true
-                pq(ix, ry + 3, 10, 10, on and T.accent or T.box, 11)
-                stroke(ix, ry + 3, 10, 10, on and T.accent or T.boxBorder, 11)
-                tx(ix + 18, ry + 1, row.label or row.id, 11, T.dim, false, 11)
-                HITS[#HITS + 1] = { x = ix - 4, y = ry - 3, w = iw + 8, h = 20, kind = "toggle", id = row.id }
+                pq(ix, ry + 7, 10, 10, on and T.accent or T.box, 11)
+                stroke(ix, ry + 7, 10, 10, on and T.accent or T.boxBorder, 11)
+                tx(ix + 19, ry + 5, row.label or row.id, 11, T.dim, false, 11)
+                HITS[#HITS + 1] = { x = ix - 4, y = ry, w = iw + 8, h = rowHeight(row), kind = "toggle", id = row.id }
             elseif row.kind == "slider" then
                 local lo = row.min or 0
                 local hi = row.max or 1
@@ -2368,52 +2405,75 @@ function MenuLib.new(config)
                 local val = values[row.id]
                 if val == nil then val = lo end
                 local f = (val - lo) / (hi - lo)
+                if f ~= f then f = 0 end
                 if f < 0 then f = 0 elseif f > 1 then f = 1 end
-                tx(ix, ry + 1, row.label or row.id, 11, T.dim, false, 11)
-                tx(x + w - 12, ry, fmtNum(fmt, val), 10, T.text, true, 11)
-                rq(ix, ry + 14, iw, 4, T.track, 11)
-                if f > 0 then rq(ix, ry + 14, iw * f, 4, T.accent, 12) end
-                rq(ix + iw * f - 3, ry + 12, 6, 8, T.handle, 13)
-                HITS[#HITS + 1] = { x = ix - 4, y = ry + 8, w = iw + 8, h = 14, kind = "slider", id = row.id,
+                local hot = editing ~= nil and editing.id == row.id
+                local shown = hot and editing.buf or fmtNum(fmt, val)
+                local vw = approxW(shown, 11)
+                local vx = x + w - 14 - vw
+                -- Snug input field, only as wide as the digits need. The text
+                -- and caret sit above it so nothing hides what you type.
+                if hot then
+                    local boxW = vw + 14
+                    if boxW < 34 then boxW = 34 end
+                    local boxX = x + w - 8 - boxW
+                    pq(boxX, ry - 1, boxW, 17, T.field, 12)
+                    stroke(boxX, ry - 1, boxW, 17, T.accent, 12)
+                end
+                tx(ix, ry + 2, row.label or row.id, 11, T.text, false, 11)
+                tx(vx, ry + 1, shown, 11, T.text, false, hot and 13 or 11)
+                if hot then pq(vx + vw + 1, ry + 3, 1, 10, T.accent, 13) end
+                -- Recessed track: dark inset inside a hairline edge, teal fill
+                -- from the left, small markers outside both ends.
+                local barY = ry + 21
+                local barH = 7
+                pq(ix, barY, iw, barH, T.track, 11)
+                pq(ix + 1, barY + 1, iw - 2, barH - 2, T.knob, 11)
+                local fillW = (iw - 2) * f
+                if fillW > 0 then pq(ix + 1, barY + 1, fillW, barH - 2, T.accent, 12) end
+                pq(ix - 6, barY + 3, 3, 1, T.mute, 11)
+                pq(ix + iw + 3, barY + 3, 3, 1, T.mute, 11)
+                HITS[#HITS + 1] = { x = ix - 4, y = ry + 18, w = iw + 8, h = 13, kind = "slider", id = row.id,
                     min = lo, max = hi, fmt = fmt, tx = ix, tw = iw }
                 -- appended last so the value box wins over the bar it sits on
-                HITS[#HITS + 1] = { x = x + w - 64, y = ry - 3, w = 54, h = 18, kind = "numedit",
+                -- wide, forgiving target: anywhere on the value opens the editor
+                HITS[#HITS + 1] = { x = x + w - 96, y = ry - 3, w = 84, h = 19, kind = "numedit",
                     id = row.id, min = lo, max = hi, fmt = fmt }
             elseif row.kind == "key" then
-                tx(ix, ry + 1, row.label or row.id, 11, T.dim, false, 11)
+                tx(ix, ry + 5, row.label or row.id, 11, T.dim, false, 11)
                 local hot = listeningId == row.id
                 local shown = values[row.id .. "Name"] or MenuLib.keyName(values[row.id])
-                local txt = hot and "[ ... ]" or ("[" .. shown .. "]")
+                local txt = hot and "[ ... ]" or ("[ " .. shown .. " ]")
                 local bw = approxW(txt, 10)
-                local bx = x + w - bw - 10
-                if hot then pq(bx - 3, ry, bw + 6, 14, T.hot, 11) end
-                tx(bx, ry + 1, txt, 10, hot and T.knob or T.accent, false, 12)
-                HITS[#HITS + 1] = { x = bx - 6, y = ry - 4, w = bw + 12, h = 20, kind = "key", id = row.id }
+                local bx = x + w - 14 - bw
+                if hot then pq(bx - 4, ry + 4, bw + 8, 15, T.hot, 11) end
+                tx(bx, ry + 5, txt, 10, hot and T.knob or T.mute, false, 12)
+                HITS[#HITS + 1] = { x = bx - 6, y = ry, w = bw + 12, h = rowHeight(row), kind = "key", id = row.id }
             elseif row.kind == "cycle" then
                 local opts = row.options or {}
-                tx(ix, ry - 1, row.label or row.id, 10, T.mute, false, 11)
-                local fy = ry + 11
-                pq(ix, fy, iw, 14, T.field, 11)
-                stroke(ix, fy, iw, 14, T.fieldBorder, 11)
-                tx(ix + 6, fy + 1, tostring(values[row.id] or "-"), 10, T.text, false, 12)
-                tx(ix + iw - 8, fy + 1, "v", 10, T.mute, true, 12)
-                HITS[#HITS + 1] = { x = ix, y = fy - 2, w = iw, h = 18, kind = "cycle",
-                    id = row.id, options = opts }
+                tx(ix, ry, row.label or row.id, 10, T.mute, false, 11)
+                local fy = ry + 16
+                pq(ix, fy, iw, 18, T.field, 11)
+                stroke(ix, fy, iw, 18, T.fieldBorder, 11)
+                tx(ix + 8, fy + 4, tostring(values[row.id] or "-"), 10, T.text, false, 12)
+                tri(ix + iw - 14, fy + 7, ix + iw - 6, fy + 7, ix + iw - 10, fy + 11, T.mute, 12)
+                HITS[#HITS + 1] = { x = ix, y = fy - 2, w = iw, h = 22, kind = "cycle",
+                    id = row.id, options = opts, fx = ix, fy = fy, fw = iw, fh = 18 }
             elseif row.kind == "text" then
                 local hot = editing and editing.id == row.id
-                tx(ix, ry - 1, row.label or row.id, 10, T.mute, false, 11)
-                local fy = ry + 11
-                pq(ix, fy, iw, 14, T.field, 11)
-                stroke(ix, fy, iw, 14, hot and T.accent or T.fieldBorder, 11)
-                tx(ix + 6, fy + 1, hot and (editing.buf .. "_") or tostring(values[row.id] or ""),
+                tx(ix, ry, row.label or row.id, 10, T.mute, false, 11)
+                local fy = ry + 16
+                pq(ix, fy, iw, 18, T.field, 11)
+                stroke(ix, fy, iw, 18, hot and T.accent or T.fieldBorder, 11)
+                tx(ix + 8, fy + 4, hot and (editing.buf .. "_") or tostring(values[row.id] or ""),
                     10, T.text, false, 12)
-                HITS[#HITS + 1] = { x = ix, y = fy - 2, w = iw, h = 18, kind = "text", id = row.id }
+                HITS[#HITS + 1] = { x = ix, y = fy - 2, w = iw, h = 22, kind = "text", id = row.id }
             elseif row.kind == "button" then
-                local fy = ry + 2
-                pq(ix, fy, iw, 16, T.field, 11)
-                stroke(ix, fy, iw, 16, T.fieldBorder, 11)
-                tx(ix + iw / 2, fy + 2, row.label or row.id, 10, T.accent, true, 12)
-                HITS[#HITS + 1] = { x = ix, y = fy, w = iw, h = 16, kind = "button", id = row.action or row.id }
+                local fy = ry + 3
+                pq(ix, fy, iw, 20, T.field, 11)
+                stroke(ix, fy, iw, 20, T.fieldBorder, 11)
+                tx(ix + iw / 2, fy + 4, row.label or row.id, 10, T.text, true, 12)
+                HITS[#HITS + 1] = { x = ix, y = fy, w = iw, h = 20, kind = "button", id = row.action or row.id }
             elseif row.kind == "note" then
                 tx(ix, ry + 4, row.label or "", 10, T.mute, false, 11)
             elseif row.kind == "file" then
@@ -2421,15 +2481,15 @@ function MenuLib.new(config)
                 tx(ix, ry + 4, fname and tostring(fname) or (row.label or ""), 10,
                     fname and T.text or T.mute, false, 11)
                 if fname then
-                    local bw, bh, gap = 28, 14, 3
-                    local bx = x + w - 10 - (bw * 3 + gap * 2)
+                    local bw, bh, gap = 30, 16, 4
+                    local bx = x + w - 12 - (bw * 3 + gap * 2)
                     local acts = { "load", "save", "del" }
                     for ai = 1, 3 do
                         local ax = bx + (ai - 1) * (bw + gap)
                         local last = ai == 3
                         pq(ax, ry + 2, bw, bh, T.field, 11)
                         stroke(ax, ry + 2, bw, bh, T.fieldBorder, 11)
-                        tx(ax + bw / 2, ry + 3, last and "x" or acts[ai], 10,
+                        tx(ax + bw / 2, ry + 5, last and "x" or acts[ai], 10,
                             last and T.mute or T.accent, true, 12)
                         HITS[#HITS + 1] = { x = ax, y = ry, w = bw, h = bh + 4, kind = "fileact",
                             id = row.id, act = acts[ai], name = fname }
@@ -2474,29 +2534,21 @@ function MenuLib.new(config)
 
     local function requiredHeight()
         local _, _, _, contentH = tabMetrics()
-        local need = TOPBAR + TABBAR + SUBBAR + PADX + PADB + contentH
+        local need = TOPBAR + TABBAR + 13 + contentH + PADB
         if need < (config.h or 0) then need = config.h end
         return need
     end
 
     local function drawMenu()
-        sqN, spN, txtN = 0, 0, 0
+        sqN, spN, txtN, triN = 0, 0, 0, 0
         HITS = {}
         if not M.open then return end
 
         M.h = requiredHeight()
         local x, y, w, h = M.x, M.y, M.w, M.h
+        local SW = SIDEBAR
 
-        rq(x, y, w, h, T.win, 8)
-        stroke(x, y, w, h, T.winBorder, 8)
-        pq(x + 6, y, w - 12, 2, T.accent, 10)
-
-        -- title strip, centred and dim like a window caption
-        rq(x + 1, y + 1, w - 2, TOPBAR - 1, T.top, 9)
-        pq(x, y + TOPBAR, w, 1, T.line, 9)
-        tx(x + w / 2, y + 8, title, 10, T.mute, true, 11)
-
-        -- the primary tab that owns the active secondary tab
+        -- the module that owns the tab on screen
         local secIdx = 1
         for i = 1, #sections do
             for _, item in ipairs(sections[i].items or {}) do
@@ -2504,66 +2556,101 @@ function MenuLib.new(config)
             end
         end
 
-        -- primary tab row
-        local pcount = math.max(1, #sections)
-        local ptabY = y + TOPBAR + 1
-        local pw = w / pcount
-        for i = 1, pcount do
-            local sxi = x + (i - 1) * pw
+        -- flat window, a single teal hairline all round
+        pq(x, y, w, h, T.win, 8)
+        stroke(x, y, w, h, T.winBorder, 8)
+
+        -- caption, teal and hard against the left edge like the reference
+        tx(x + 14, y + 8, title, 11, T.accent, false, 11)
+        pq(x, y + TOPBAR, w, 1, T.line, 9)
+
+        -- darker module column down the left, divider on its right
+        local sbTop = y + TOPBAR + 1
+        pq(x + 1, sbTop, SW - 1, h - TOPBAR - 2, T.side, 9)
+        pq(x + SW, sbTop, 1, h - TOPBAR - 1, T.line, 9)
+        local ly = sbTop + 12
+        for i = 1, #sections do
             local active = i == secIdx
-            if active then rq(sxi + 6, ptabY + 4, pw - 12, TABBAR - 8, T.hi, 10) end
-            tx(sxi + pw / 2, ptabY + 9, sections[i].label or "", 11,
-                active and T.text or T.mute, true, 11)
-            if active then pq(sxi + pw * 0.33, ptabY + TABBAR - 1, pw * 0.34, 1, T.accent, 12) end
-            HITS[#HITS + 1] = { x = sxi, y = ptabY, w = pw, h = TABBAR, kind = "ptab", section = i }
+            if active then
+                pq(x + 2, ly - 6, SW - 3, 25, T.hi, 9)
+                pq(x + 2, ly - 6, 2, 25, T.accent, 10)
+            end
+            tx(x + 16, ly, sections[i].label or "", 11, active and T.text or T.mute, false, 11)
+            HITS[#HITS + 1] = { x = x, y = ly - 6, w = SW, h = 25, kind = "ptab", section = i }
+            ly = ly + 30
         end
-        pq(x, ptabY + TABBAR, w, 1, T.line, 9)
 
-        -- secondary tab row
-        local subY = ptabY + TABBAR + 1
+        -- tab pills along the top of the content column
+        local cx = x + SW + 1
+        local cw = w - SW - 1
+        local tabY = sbTop
         local subs = (sections[secIdx] or {}).items or {}
-        local scount = math.max(1, #subs)
-        local sw = w / scount
-        for i = 1, scount do
+        local ptx = cx + PADX
+        for i = 1, #subs do
             local item = subs[i]
-            local sxi = x + (i - 1) * sw
-            local active = item ~= nil and item.tab == CUR_TAB
-            tx(sxi + 12, subY + 6, (item and item.label) or "", 11,
-                active and T.accent or T.mute, false, 11)
-            if active then pq(sxi + 12, subY + SUBBAR - 1, math.max(20, sw - 24), 1, T.accent, 12) end
-            HITS[#HITS + 1] = { x = sxi, y = subY, w = sw, h = SUBBAR, kind = "tab",
-                id = item and item.tab }
+            local active = item.tab == CUR_TAB
+            local pw = approxW(item.label or "", 11) + 26
+            if active then
+                pq(ptx, tabY + 5, pw, TABBAR - 10, T.hi, 10)
+                pq(ptx, tabY + TABBAR - 3, pw, 2, T.accent, 11)
+            end
+            tx(ptx + 13, tabY + 9, item.label or "", 11, active and T.text or T.mute, false, 11)
+            HITS[#HITS + 1] = { x = ptx, y = tabY, w = pw, h = TABBAR, kind = "tab", id = item.tab }
+            ptx = ptx + pw + 4
         end
-        pq(x, subY + SUBBAR, w, 1, T.line, 9)
+        pq(cx, tabY + TABBAR, cw, 1, T.line, 9)
 
+        -- cards: two even columns, top aligned, sized to their rows
         local list = tabs[CUR_TAB] or {}
-        local availW = w - PADX * 2
+        local availW = cw - PADX * 2
         local _, _, gap, _, two, off = tabMetrics()
         local colW = two and (availW - PADX) / 2 or availW
-        local cy0 = subY + SUBBAR + PADX
+        local cy0 = tabY + TABBAR + 12
         local colY = { cy0 + off[1], cy0 + off[2] }
         for i = 1, #list do
             local col = tabCol(list[i], i)
             if col > 2 then col = 2 end
             col = col - 1
-            local ch = drawCard(tabId(list[i]), x + PADX + col * (colW + PADX), colY[col + 1], colW)
+            local ch = drawCard(tabId(list[i]), cx + PADX + col * (colW + PADX), colY[col + 1], colW)
             colY[col + 1] = colY[col + 1] + ch + gap
         end
 
+        -- open option list, drawn over the cards and flipped up when the field
+        -- sits too close to the bottom edge
+        if dropdown then
+            local opts = dropdown.options or {}
+            local orowH = 20
+            local bw = dropdown.fw
+            local dropH = #opts * orowH + 2
+            local dy = dropdown.fy + dropdown.fh + 2
+            if dy + dropH > y + h - 4 then dy = dropdown.fy - dropH - 2 end
+            pq(dropdown.fx, dy, bw, dropH, T.win, 13)
+            stroke(dropdown.fx, dy, bw, dropH, T.fieldBorder, 13)
+            for i = 1, #opts do
+                local oy = dy + 1 + (i - 1) * orowH
+                local sel = values[dropdown.id] == opts[i]
+                if sel then pq(dropdown.fx + 1, oy, bw - 2, orowH - 1, T.hi, 13) end
+                tx(dropdown.fx + 9, oy + 4, tostring(opts[i]), 10, sel and T.accent or T.dim, false, 14)
+                HITS[#HITS + 1] = { x = dropdown.fx, y = oy, w = bw, h = orowH,
+                    kind = "dropdownitem", value = opts[i] }
+            end
+        end
+
         if confirmBox then
-            local bw, bh = 250, 76
+            local bw, bh = 260, 78
             local bx = x + (w - bw) / 2
             local by = y + (h - bh) / 2
-            rq(bx, by, bw, bh, T.card, 13)
+            pq(bx, by, bw, bh, T.win, 13)
             stroke(bx, by, bw, bh, T.winBorder, 13)
-            tx(bx + 12, by + 14, confirmBox.text, 12, T.text, false, 14)
+            tx(bx + 12, by + 14, confirmBox.text, 11, T.text, false, 14)
             local yw, yh = 66, 18
             local yx, yy = bx + 12, by + bh - 32
-            rq(yx, yy, yw, yh, T.accent, 13)
-            tx(yx + yw / 2, yy + 2, "yes", 11, T.knob, true, 14)
+            pq(yx, yy, yw, yh, T.accent, 13)
+            tx(yx + yw / 2, yy + 3, "yes", 10, T.knob, true, 14)
             local nx = bx + bw - yw - 12
-            rq(nx, yy, yw, yh, T.track, 13)
-            tx(nx + yw / 2, yy + 2, "no", 11, T.text, true, 14)
+            pq(nx, yy, yw, yh, T.field, 13)
+            stroke(nx, yy, yw, yh, T.fieldBorder, 13)
+            tx(nx + yw / 2, yy + 3, "no", 10, T.text, true, 14)
             HITS[#HITS + 1] = { x = yx, y = yy, w = yw, h = yh, kind = "confirmyes" }
             HITS[#HITS + 1] = { x = nx, y = yy, w = yw, h = yh, kind = "confirmno" }
         end
@@ -2571,12 +2658,14 @@ function MenuLib.new(config)
         for i = sqN + 1, #SQ_ROUND do SQ_ROUND[i].Visible = false end
         for i = spN + 1, #SQ_PLAIN do SQ_PLAIN[i].Visible = false end
         for i = txtN + 1, #TX_POOL do TX_POOL[i].Visible = false end
+        for i = triN + 1, #TRI do TRI[i].Visible = false end
     end
 
     local function hideAll()
         for i = 1, #SQ_ROUND do SQ_ROUND[i].Visible = false end
         for i = 1, #SQ_PLAIN do SQ_PLAIN[i].Visible = false end
         for i = 1, #TX_POOL do TX_POOL[i].Visible = false end
+        for i = 1, #TRI do TRI[i].Visible = false end
     end
 
     local function setOpen(state)
@@ -2586,6 +2675,7 @@ function MenuLib.new(config)
             drawMenu()
         else
             HITS = {}
+            dropdown = nil
             hideAll()
         end
     end
@@ -2639,10 +2729,13 @@ function MenuLib.new(config)
 
     local function startEdit(hit)
         local cur = values[hit.id]
+        local numeric = hit.numeric == true
         editing = {
             id = hit.id,
-            buf = cur ~= nil and tostring(cur) or "",
-            numeric = hit.numeric == true,
+            -- a number opens empty, so the first key typed replaces the value
+            -- instead of being appended to the number already there
+            buf = (not numeric and cur ~= nil) and tostring(cur) or "",
+            numeric = numeric,
             min = hit.min, max = hit.max, fmt = hit.fmt,
             prev = {},
         }
@@ -2674,6 +2767,9 @@ function MenuLib.new(config)
                     elseif (ch == "-" or ch == "+") and #editing.buf > 0 then
                         accept = false
                     elseif not editing.numeric and ch == "+" then
+                        accept = false
+                    end
+                    if accept and editing.numeric and #editing.buf >= 8 then
                         accept = false
                     end
                     if accept then editing.buf = editing.buf .. ch end
@@ -2775,6 +2871,13 @@ function MenuLib.new(config)
                 confirmBox = nil
                 dirty = true
                 if yes and onYes then pcall(onYes) end
+            elseif dropdown then
+                local hit = hitAt(mx, my)
+                if hit and hit.kind == "dropdownitem" then
+                    setValue(dropdown.id, hit.value)
+                end
+                dropdown = nil
+                dirty = true
             elseif mx >= M.x and mx <= M.x + M.w and my >= M.y and my <= M.y + TOPBAR then
                 dragging = true
                 dragOffX, dragOffY = mx - M.x, my - M.y
@@ -2804,15 +2907,9 @@ function MenuLib.new(config)
                     elseif hit.kind == "key" then
                         startBind(hit.id)
                     elseif hit.kind == "cycle" then
-                        local opts = hit.options or {}
-                        local idx = 0
-                        for i = 1, #opts do
-                            if opts[i] == values[hit.id] then idx = i end
-                        end
-                        if #opts > 0 then
-                            local nxt = opts[(idx % #opts) + 1]
-                            if nxt then setValue(hit.id, nxt) end
-                        end
+                        dropdown = { id = hit.id, options = hit.options or {},
+                            fx = hit.fx, fy = hit.fy, fw = hit.fw, fh = hit.fh }
+                        dirty = true
                     elseif hit.kind == "button" then
                         fireChanged(hit.id, true)
                     elseif hit.kind == "fileact" then
@@ -2842,10 +2939,12 @@ function MenuLib.new(config)
     local function destroy()
         if destroyed then return end
         destroyed = true
-        listeningId, editing, confirmBox = nil, nil, nil
+        listeningId, editing, confirmBox, dropdown = nil, nil, nil, nil
         for i = 1, #SQ_ROUND do pcall(function() SQ_ROUND[i]:Remove() end) end
         for i = 1, #SQ_PLAIN do pcall(function() SQ_PLAIN[i]:Remove() end) end
         for i = 1, #TX_POOL do pcall(function() TX_POOL[i]:Remove() end) end
+        for i = 1, #TRI do pcall(function() TRI[i]:Remove() end) end
+        pcall(function() MEAS:Remove() end)
         HITS = {}
     end
 
@@ -2872,6 +2971,7 @@ function MenuLib.new(config)
 
         tab = function(index)
             CUR_TAB = index
+            dropdown = nil
             dirty = true
         end,
         currentTab = function() return CUR_TAB end,
@@ -2906,24 +3006,23 @@ end
 local menu
 if MenuLib then
 local okNew, m = pcall(MenuLib.new, {
-    title = "TRIGGERBOT",
-    x = 60, y = 80, w = 620,
+    title = "Triggerbot",
+    x = 60, y = 80, w = 660,
+    sidebar = 112,
     key = CFG.menuKey,
     values = CFG,
     sections = {
-        { label = "Aim", items = {
+        { label = "Combat", items = {
             { label = "General", tab = 1 },
-            { label = "Weapons", tab = 2 },
+        } },
+        { label = "Weapons", items = {
+            { label = "Guns", tab = 2 },
         } },
         { label = "Target", items = {
             { label = "Targeting", tab = 3 },
-            { label = "Accuracy", tab = 4 },
         } },
-        { label = "Behavior", items = {
-            { label = "Humanization", tab = 5 },
-        } },
-        { label = "Profile", items = {
-            { label = "Configs", tab = 6 },
+        { label = "Settings", items = {
+            { label = "Configs", tab = 4 },
         } },
     },
     tabs = {
@@ -2937,9 +3036,7 @@ local okNew, m = pcall(MenuLib.new, {
             { id = "gmguns", col = 2 },
         },
         [3] = { "sticky" },
-        [4] = { "prediction", "bands" },
-        [5] = { "humanize", "hesitation" },
-        [6] = { "profile", "saved" },
+        [4] = { "profile", "saved" },
     },
     cards = {
         main = {
@@ -2956,7 +3053,7 @@ local okNew, m = pcall(MenuLib.new, {
             title = "Hitbox",
             rows = {
                 { kind = "toggle", id = "tb_visualize", label = "Visualize" },
-                { kind = "slider", id = "tb_maxdist", label = "Max dist", min = 0, max = 2000, fmt = "%d" },
+                { kind = "slider", id = "tb_maxdist", label = "Distance", min = 0, max = 2000, fmt = "%d" },
                 { kind = "slider", id = "tb_hitbox_x", label = "Hitbox X", min = 0.1, max = 5.0, fmt = "%.1f" },
                 { kind = "slider", id = "tb_hitbox_y", label = "Hitbox Y", min = 0.5, max = 8.0, fmt = "%.1f" },
             },
@@ -2995,12 +3092,9 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "key", id = "gm_key", label = "Activation key" },
                 { kind = "cycle", id = "gm_mode", label = "Mode",
                     options = { "hold", "toggle", "always" } },
-                { kind = "cycle", id = "gm_method", label = "Method",
-                    options = { "keys", "equip" } },
                 { kind = "slider", id = "gm_delay", label = "Swap delay", min = 10, max = 400, fmt = "%dms" },
                 { kind = "toggle", id = "gm_dist_on", label = "Distance based" },
                 { kind = "toggle", id = "gm_link", label = "Link to triggerbot" },
-                { kind = "slider", id = "gm_link_ms", label = "Linger", min = 0, max = 500, fmt = "%dms" },
             },
         },
         gmguns = {
@@ -3019,7 +3113,6 @@ local okNew, m = pcall(MenuLib.new, {
             toggle = "tb_sticky",
             rows = {
                 { kind = "key", id = "tb_selkey", label = "Select key" },
-                { kind = "key", id = "tb_unselkey", label = "Unselect key" },
                 { kind = "toggle", id = "tb_selvis", label = "Target visuals" },
                 { kind = "toggle", id = "esp_box", label = "Box" },
                 { kind = "toggle", id = "esp_name", label = "Name" },
@@ -3030,52 +3123,8 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "button", action = "selClear", label = "reset targets" },
             },
         },
-        prediction = {
-            title = "Prediction",
-            toggle = "tb_pred",
-            rows = {
-                { kind = "slider", id = "tb_pred_x", label = "X", min = 0.0, max = 0.5, fmt = "%.3f" },
-                { kind = "slider", id = "tb_pred_y", label = "Y", min = 0.0, max = 0.5, fmt = "%.3f" },
-                { kind = "slider", id = "tb_pred_smooth", label = "Vel smooth", min = 0.0, max = 0.9, fmt = "%.2f" },
-                { kind = "toggle", id = "tb_dist_pred", label = "Distance based" },
-            },
-        },
-        bands = {
-            title = "Distance bands",
-            rows = {
-                { kind = "slider", id = "tb_close_dist", label = "Close dist", min = 1, max = 150, fmt = "%d" },
-                { kind = "slider", id = "tb_close_x", label = "Close X", min = 0.0, max = 0.5, fmt = "%.3f" },
-                { kind = "slider", id = "tb_close_y", label = "Close Y", min = 0.0, max = 0.5, fmt = "%.3f" },
-                { kind = "slider", id = "tb_mid_dist", label = "Mid dist", min = 1, max = 300, fmt = "%d" },
-                { kind = "slider", id = "tb_mid_x", label = "Mid X", min = 0.0, max = 0.5, fmt = "%.3f" },
-                { kind = "slider", id = "tb_mid_y", label = "Mid Y", min = 0.0, max = 0.5, fmt = "%.3f" },
-                { kind = "slider", id = "tb_far_x", label = "Far X", min = 0.0, max = 0.5, fmt = "%.3f" },
-                { kind = "slider", id = "tb_far_y", label = "Far Y", min = 0.0, max = 0.5, fmt = "%.3f" },
-            },
-        },
-        humanize = {
-            title = "Humanize",
-            toggle = "tb_humanize",
-            rows = {
-                { kind = "slider", id = "tb_delay_min", label = "React min", min = 0, max = 500, fmt = "%dms" },
-                { kind = "slider", id = "tb_delay_max", label = "React max", min = 0, max = 500, fmt = "%dms" },
-                { kind = "slider", id = "tb_int_min", label = "Interval min", min = 0, max = 1000, fmt = "%dms" },
-                { kind = "slider", id = "tb_int_max", label = "Interval max", min = 0, max = 1000, fmt = "%dms" },
-                { kind = "slider", id = "tb_hold_min", label = "Hold min", min = 0, max = 300, fmt = "%dms" },
-                { kind = "slider", id = "tb_hold_max", label = "Hold max", min = 0, max = 300, fmt = "%dms" },
-            },
-        },
-        hesitation = {
-            title = "Hesitation",
-            rows = {
-                { kind = "slider", id = "tb_hes_chance", label = "Chance", min = 0, max = 100, fmt = "%d%%" },
-                { kind = "slider", id = "tb_hes_min", label = "Min", min = 0, max = 2000, fmt = "%dms" },
-                { kind = "slider", id = "tb_hes_max", label = "Max", min = 0, max = 2000, fmt = "%dms" },
-                { kind = "slider", id = "tb_fatigue", label = "Fatigue", min = 0, max = 100, fmt = "%dms" },
-            },
-        },
         profile = {
-            title = "Profile",
+            title = "Settings",
             rows = {
                 { kind = "text", id = "cfgName", label = "Name" },
                 { kind = "button", action = "cfgCreate", label = "save config" },
