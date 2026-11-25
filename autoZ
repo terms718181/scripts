@@ -1,46 +1,3 @@
--- Auto Farm Stomp - fake DH (place 138014591158268)
---
--- Matcha menu tab "Auto Farm" + a script-owned toggle key (default K).
---
--- The enable state lives in the script, NOT in a widget: widget values only
--- exist once the tab has rendered, so a widget-only toggle silently left the
--- farm on forever. K is handled by a real InputBegan listener (your own
--- keyboard reaches the game normally - only synthetic presses are limited),
--- with an IsKeyDown poll as a backstop.
---
---   K                   start / stop (rebindable with the keybind in the tab)
---   _G.AutoFarm.set(b)  force on/off
---   _G.AutoFarm.stop()
---
--- Measured constraints of this build:
---   * Synthetic Space(32), Enter(13), Escape(27) reach the game. E, R, digits,
---     Tab, Shift, Ctrl, Alt and F-keys do NOT.
---   * Clicks only count with the cursor over the 3D view.
---   * Knocked = Character.BodyEffects["K.O"].Value, dead = BodyEffects["Dead"].
---   * Real keys arrive as Roblox KeyCodes (E = 101, K = 107); the menu keybind
---     speaks VK codes (K = 75). Both spellings are accepted everywhere.
---   * Matcha clears the whole widget store when the menu re-initialises; ids
---     then come back nil/0/false. That reset must never be read as "the player
---     turned the farm off", and one bad widget must not abort the rest.
---
--- Auto Stomp: a knocked OR dead player is not skipped. The script snaps on top
--- of them and fires
---   ReplicatedStorage.MainRemotes.MainRemoteEvent:FireServer(
---       "Stomp", {Ignored = {workspace.Ignored}}, nil, Character.BodyEffects)
--- on the rate slider, immediately - no settle wait, no cooldown learning, no
--- confirmation window, no E press, no InvokeServer. This is the version that
--- stomped instantly. Dead bodies count: a player lying there after K.O. is still
--- stompable, and skipping them is what made the farm go quiet.
--- The overlay's "stomp landed/fired" is still measured from ProfileStats.Stomps
--- so you can see the real hit rate; it does not gate anything.
---
--- Movement: hovering used to write CFrame every 0.05s, which jittered the camera
--- and let the body slide out from under you. Anything further than 60 studs is
--- still one clean snap, but inside that the character is driven by
--- AssemblyLinearVelocity - a frame-rate-independent spring ("Stick Strength" in
--- the tab) - so it tracks the body smoothly and stays pinned to it without any
--- more CFrame writes.
-
 if _G.AutoFarm and _G.AutoFarm.stop then
     pcall(_G.AutoFarm.stop)
 end
@@ -76,6 +33,18 @@ local stompFires = 0
 local stompLanded = 0
 local lastStomp = 0
 local stompMiss = 0
+local paidFor = {}                      -- userId -> character model that already credited
+local pendingQ = {}                     -- bodies with a stomp fire not paid for yet
+local creditedSeen = nil                -- Stomps already matched to a body
+-- One queue entry per BODY, not per fire. A body can only pay once, and one entry
+-- per fire let stale entries soak up the credits meant for the next body - that
+-- body then looks unpaid forever and gets ground until it respawns.
+local function armCredit(t, now)
+    for _, q in ipairs(pendingQ) do
+        if q.id == t.id and q.char == t.char then return end
+    end
+    pendingQ[#pendingQ + 1] = { ref = t, id = t.id, char = t.char, at = now }
+end
 local STOMP_MARGIN = 1.2                -- pace this much slower than the learned cooldown
 local settleTime = 0.08
 local cooldown = 0.15                   -- learned server stomp cooldown, seconds
@@ -88,7 +57,7 @@ local lastTogglePress = 0
 local ignoreToggleUntil = 0
 local lastSeenToggle = nil
 local downLatch = nil
-local lastFire, lastAim, lastTele, lastKillAt = 0, 0, 0, nil
+local lastFire, lastAim, lastTele = 0, 0, 0
 local tabReady, tabReadyAt = false, 0
 local wasReady = false
 local lastPushBack = 0
@@ -219,7 +188,14 @@ local function pickTarget()
     local myRoot = ch and ch:FindFirstChild("HumanoidRootPart")
     if not myRoot then return nil end
     local myPos = myRoot.Position
-    local best, bestD = nil, S.range
+    -- Rank decides who is worth walking to, distance only breaks ties:
+    --   3 = a downed body that has not paid yet (a stomp that still credits)
+    --   2 = a live player (go knock them down)
+    -- A body that already paid is not a target at all, not even as a last resort.
+    -- Camping a spent corpse is exactly what looked like the farm stalling until
+    -- that player respawned, when there was simply nothing left to do. With no
+    -- candidate the loop keeps scanning and takes a respawn the moment it lands.
+    local best, bestD, bestRank = nil, S.range, 0
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= lp then
             local tc = p.Character
@@ -227,18 +203,26 @@ local function pickTarget()
             local hum = tc and tc:FindFirstChild("Humanoid")
             if root and hum then
                 local be = tc:FindFirstChild("BodyEffects")
-                -- Dead bodies are included on purpose: a player lying there after
-                -- the K.O. window still gets stomped and still pays, and that is
-                -- the state most targets are in once the fight is over.
-                local d = (root.Position - myPos).Magnitude
-                if d < bestD then
-                    bestD = d
-                    best = {
-                        plr = p, char = tc, root = root, hum = hum,
-                        head = tc:FindFirstChild("Head") or root,
-                        ko = be and be:FindFirstChild("K.O"),
-                        dead = be and be:FindFirstChild("Dead"),
-                    }
+                local ko = be and be:FindFirstChild("K.O")
+                local dead = be and be:FindFirstChild("Dead")
+                -- Downed and dead both count: a body lying there still pays, and
+                -- that is the state most targets end up in mid-fight.
+                local downed = (ko and ko.Value == true) or (dead and dead.Value == true)
+                local spent = downed and (paidFor[p.UserId] == tc)
+                if not spent then
+                    -- A body always outranks a live player: the farm stays on it
+                    -- until the stomp is actually credited, then the watcher drops
+                    -- the target and the next scan takes whoever is alive.
+                    local rank = downed and 3 or 2
+                    local d = (root.Position - myPos).Magnitude
+                    if d <= S.range and (rank > bestRank or (rank == bestRank and d < bestD)) then
+                        bestRank, bestD = rank, d
+                        best = {
+                            plr = p, id = p.UserId, char = tc, root = root, hum = hum,
+                            head = tc:FindFirstChild("Head") or root,
+                            ko = ko, dead = dead, rank = rank,
+                        }
+                    end
                 end
             end
         end
@@ -268,6 +252,18 @@ local function isStompable(t)
     return false
 end
 
+-- The same ranks pickTarget uses, recomputed for the body we are already on, so
+-- a better target appearing mid-fight pulls the farm off a spent body. 0 means
+-- "not worth being on at all" - a corpse that has already paid.
+local function targetRank(t)
+    if not t then return 0 end
+    if isStompable(t) then
+        if paidFor[t.id] == t.char then return 0 end
+        return 3
+    end
+    return 2
+end
+
 task.spawn(function()
     while running do
         pcall(refreshGuns)
@@ -280,15 +276,56 @@ task.spawn(function()
     while running do
         local ok, err = pcall(function()
             if target and isGone(target) then
-                lastKillAt = tick()
                 target = nil
             end
-            if not target and (not lastKillAt or tick() - lastKillAt >= 0.8) then
-                target = pickTarget()
+            -- Scan on every pass, never just once. Whatever is alive (or freshly
+            -- knocked) is taken the moment it shows up, so a respawn pulls the
+            -- farm off a spent corpse instead of leaving it to wait there.
+            local cand = pickTarget()
+            if cand then
+                if not target or targetRank(cand) > targetRank(target) then
+                    if target and cand ~= target then
+                        status = "switch " .. cand.plr.Name
+                    end
+                    target = cand
+                end
+            elseif target and targetRank(target) == 0 then
+                -- Spent corpse: let it go instead of sitting on it until it
+                -- respawns. The scan keeps running, so the respawn is still taken.
+                target = nil
             end
         end)
         if not ok then loopError = "target: " .. tostring(err) end
-        task.wait(0.15)
+        task.wait(0.05)                        -- 20 scans a second: a respawn is taken at once
+    end
+end)
+
+-- --------------------------------------------------------------- credit watcher
+-- A stomp pays out through ProfileStats.Stomps, not through the remote's return
+-- value (that returns true on every call). Poll it fast: the instant the count
+-- ticks up, the body that was just stomped is spent, so mark it paid and drop
+-- the target - the next pass then goes straight to somebody else.
+task.spawn(function()
+    while running do
+        local c = creditedStomps()
+        if creditedSeen == nil then creditedSeen = c end
+        -- One credit per fire, oldest first. A single slot lost credits whenever
+        -- two landed close together, and a body that was paid but never marked
+        -- reads as unpaid forever - the farm then sits on that corpse stomping
+        -- something that can never pay again. Matching a queue keeps every fire
+        -- accounted for, so a paid body is always recognised and dropped.
+        while c > creditedSeen and #pendingQ > 0 do
+            local p = table.remove(pendingQ, 1)
+            creditedSeen = creditedSeen + 1
+            stompLanded = stompLanded + 1
+            if p.char then paidFor[p.id] = p.char end
+            if target == p.ref then
+                target = nil
+                status = "next"
+            end
+        end
+        if c > creditedSeen then creditedSeen = c end     -- a credit we cannot place
+        task.wait(0.05)
     end
 end)
 
@@ -410,7 +447,26 @@ mainConn = RunService.Heartbeat:Connect(function(dt)
 
         local t = target
         if not t or isGone(t) then
-            status = "no target"
+            -- Say why there is nothing to do, so an empty server never reads as a
+            -- hung script. If every other player is a stomped body there is no
+            -- one to go to - the scan is still running and takes the first
+            -- respawn, so this is a wait on the players, not on a corpse.
+            local down, total = 0, 0
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= lp then
+                    local pc = p.Character
+                    if pc then
+                        total = total + 1
+                        local be = pc:FindFirstChild("BodyEffects")
+                        local ko = be and be:FindFirstChild("K.O")
+                        local dead = be and be:FindFirstChild("Dead")
+                        if (ko and ko.Value == true) or (dead and dead.Value == true) then
+                            down = down + 1
+                        end
+                    end
+                end
+            end
+            status = "waiting for a live player (" .. down .. "/" .. total .. " down)"
             return
         end
 
@@ -465,15 +521,14 @@ mainConn = RunService.Heartbeat:Connect(function(dt)
             if now - lastStomp >= S.stompRate then
                 lastStomp = now
                 stompFires = stompFires + 1
-                local before = creditedStomps()
                 local be = ch:FindFirstChild("BodyEffects")
                 local ign = workspace:FindFirstChild("Ignored")
                 pcall(function()
                     stompRemote:FireServer("Stomp", { Ignored = ign and { ign } or {} }, nil, be)
                 end)
-                task.delay(0.5, function()
-                    if creditedStomps() > before then stompLanded = stompLanded + 1 end
-                end)
+                -- Arms the credit watcher; it does the switching the moment this
+                -- fire is actually paid for, so nothing is paced here.
+                armCredit(t, now)
                 status = "stomping " .. t.plr.Name
             end
             return
