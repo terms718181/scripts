@@ -4,7 +4,6 @@ local Workspace = game:GetService("Workspace")
 pcall(setrobloxinput, true)
 
 local MOUSE_Y_OFFSET = 0 -- shots landing ~58px above cursor? set 58
-
 local CFG = {
     tb_enabled = true,
     tb_key = 0x06,
@@ -155,6 +154,9 @@ end
 
 local SELECTED, SELVIS = {}, {}
 local prevSelKey, prevUnselKey = false, false
+-- assigned once the config folder helpers exist further down: every pick is
+-- written out, so a reload of the script brings the targets back
+local saveTargets, clearSel
 
 -- instance userdata gets rewrapped between frames, key on Address
 local function selKey(t)
@@ -164,6 +166,7 @@ end
 
 local function addSel(t)
     if t and t.character then SELECTED[selKey(t)] = t end
+    if saveTargets then saveTargets() end
 end
 
 local function remSel(t)
@@ -175,6 +178,7 @@ local function remSel(t)
         pcall(function() sv.box:Remove() end)
         pcall(function() sv.txt:Remove() end)
     end
+    if saveTargets then saveTargets() end
 end
 
 local function selOk(t)
@@ -604,9 +608,9 @@ local function closestSelected(cx, cy)
     return best
 end
 
-local function findClosest(cx, cy, localPos, ignoreSel)
+local function findClosest(cx, cy, localPos, ignoreSel, noCap)
     local best, bestDist = nil, 9e9
-    local maxd = wepCap()
+    local maxd = noCap and 0 or wepCap()
     for _, t in ipairs(collectTargets()) do
         local hrp = t.hrp
         if hrp then
@@ -962,6 +966,51 @@ local gmNext, gmErr = 0, nil
 local gmHeldVk, gmIdx, gmCheckAt = nil, 0, 0
 local gmPin = nil
 
+-- is the crosshair on a player right now? the same test the trigger runs
+-- before it fires: the projected hitbox plus its 12px margin. it is repeated
+-- here because the trigger returns before it ever gets that far when a knife is
+-- in hand, and it cannot see past the gun's own check anyway. a player merely
+-- standing in range, or anywhere on screen, must not switch the guns
+local gmAimAt, gmAimT = 0, nil
+local function gmOnBox(t, cx, cy)
+    local hrp = t and t.hrp
+    if not hrp then return false end
+    local ok, hit = pcall(function()
+        local pos = hrp.Position
+        local sp, os = WorldToScreen(pos)
+        if not os then return false end
+        local hx, hy = cfg("tb_hitbox_x"), cfg("tb_hitbox_y")
+        local spx = WorldToScreen(pos + Vector3.new(hx, 0, 0))
+        local spz = WorldToScreen(pos + Vector3.new(0, 0, hx))
+        local spy = WorldToScreen(pos + Vector3.new(0, hy, 0))
+        local hw = math.max(math.abs(spx.X - sp.X), math.abs(spz.X - sp.X))
+        local hh = math.abs(spy.Y - sp.Y)
+        return math.abs(cx - sp.X) <= hw + 12
+            and math.abs(cy - sp.Y) <= hh + 12
+    end)
+    return ok and hit == true
+end
+
+local function gmAimedTarget()
+    local now = tick()
+    if now - gmAimAt < 0.05 then return gmAimT end
+    gmAimAt = now
+    gmAimT = nil
+    local lp = localPlayer()
+    local char = lp and lp.Character
+    if not char then return nil end
+    local cx, cy = cursorPos()
+    local skipKo = cfg("tb_knock")
+    for _, t in ipairs(collectTargets()) do
+        if t.character ~= char and gmOnBox(t, cx, cy)
+            and not (skipKo and isKnocked(t.character)) then
+            gmAimT = t
+            return t
+        end
+    end
+    return nil
+end
+
 local function gmActive()
     if not cfg("gm_on") then return false end
     if cfg("gm_link") then
@@ -969,7 +1018,24 @@ local function gmActive()
         -- a linger above 0 keeps the spam alive briefly after it disengages.
         if tbEngaged then return true end
         local linger = (tonumber(cfg("gm_link_ms")) or 0) / 1000
-        return linger > 0 and (tick() - lastFireAt) <= linger
+        if linger > 0 and (tick() - lastFireAt) <= linger then return true end
+        -- the key works while linked too, because the trigger returns before it
+        -- ever engages with a knife in hand, and cannot see past the gun's own
+        -- check. it only counts at a player the crosshair is on: the macro is
+        -- not meant to cycle guns at nothing
+        local key = tonumber(cfg("gm_key"))
+        if key and vkHeld(key) then
+            if cfg("gm_mode") == "toggle" then
+                if not gmPrev then gmOn = not gmOn end
+                gmPrev = true
+                if not gmOn then return false end
+            else
+                gmPrev = true
+            end
+            return gmAimedTarget() ~= nil
+        end
+        gmPrev = false
+        return false
     end
     local mode = cfg("gm_mode")
     if mode == "always" then return true end
@@ -1195,9 +1261,16 @@ local function gmNearestDist()
         gmDistVal = nil
         return nil
     end
-    -- the target the triggerbot is actually shooting wins whenever one is
-    -- locked, so a knocked body or a bot standing next to you cannot drag the
-    -- macro down to close range
+    -- the player the crosshair is on is what this switch is about, so it wins
+    -- over everything else. a knocked body or a bot standing next to you used to
+    -- drag the macro down to close range while you aimed at somebody far off
+    local aimed = gmAimedTarget()
+    local apos = aimed and gmRootPos(aimed.character)
+    if apos then
+        gmDistVal = dist3(me, apos)
+        return gmDistVal
+    end
+    -- otherwise the target the triggerbot is actually shooting
     local bot = _G.StellarTriggerbot
     local locked = bot and bot.LockedTarget
     if locked and locked ~= char then
@@ -1732,6 +1805,121 @@ local function loadConfig(name)
         end
     end
     return true
+end
+
+-- ---------------------------------------------------------------
+-- targets: the sticky picks are written next to the configs so a reload of
+-- the script brings them back. players are remembered by user id, everything
+-- else by its full name in the workspace
+-- ---------------------------------------------------------------
+do
+    local SEL_FILE = CFG_DIR .. "/targets.txt"
+    local restoring = false
+    local pending = nil
+    local tickAt = 0
+
+    local function selId(t)
+        local ch = t and t.character
+        if not ch then return nil end
+        local okP, plr = pcall(function()
+            return t.player or Players:GetPlayerFromCharacter(ch)
+        end)
+        if okP and plr then
+            local okI, uid = pcall(function() return plr.UserId end)
+            if okI and uid then return "p:" .. tostring(uid) end
+            local okN, nm = pcall(function() return plr.Name end)
+            if okN and nm then return "p:" .. nm end
+        end
+        local okF, full = pcall(function() return ch:GetFullName() end)
+        if okF and full then return "m:" .. full end
+        return nil
+    end
+
+    saveTargets = function()
+        if restoring then return end
+        local ids, seen = {}, {}
+        for _, t in pairs(SELECTED) do
+            local id = selId(t)
+            if id and not seen[id] then
+                seen[id] = true
+                ids[#ids + 1] = id
+            end
+        end
+        table.sort(ids)
+        pcall(function()
+            makefolder(CFG_DIR)
+            writefile(SEL_FILE, table.concat(ids, "\n"))
+        end)
+    end
+
+    clearSel = function()
+        -- collect first: removing keys while pairs() is walking them raises
+        local list = {}
+        for _, t in pairs(SELECTED) do list[#list + 1] = t end
+        for _, t in ipairs(list) do remSel(t) end
+        for k in pairs(SELECTED) do SELECTED[k] = nil end
+        for k in pairs(SELVIS) do SELVIS[k] = nil end
+        pending = nil
+        saveTargets()
+    end
+
+    local function restoreTargets()
+        local ok, raw = pcall(readfile, SEL_FILE)
+        if not ok or type(raw) ~= "string" or #raw == 0 then return end
+        local ids = {}
+        for line in raw:gmatch("[^%r\n]+") do
+            line = line:gsub("^%s+", ""):gsub("%s+$", "")
+            if #line > 0 then ids[line] = true end
+        end
+        if next(ids) then pending = ids end
+    end
+
+    -- picks are matched as their targets appear: a reload can beat the player
+    -- list by a frame or two, so this keeps asking until every saved id has a
+    -- body in the game
+    local function targetsTick()
+        if not pending then return end
+        local now = tick()
+        if now - tickAt < 0.5 then return end
+        tickAt = now
+        local ok, list = pcall(collectTargets)
+        if not ok or type(list) ~= "table" then return end
+        local addNow, left = {}, 0
+        for id in pairs(pending) do
+            local found = nil
+            for _, t in ipairs(list) do
+                if selId(t) == id then found = t; break end
+            end
+            if found then
+                addNow[#addNow + 1] = { id = id, t = found }
+            else
+                left = left + 1
+            end
+        end
+        restoring = true
+        for _, a in ipairs(addNow) do
+            addSel(a.t)
+            pending[a.id] = nil
+        end
+        restoring = false
+        if left == 0 then pending = nil end
+    end
+
+    restoreTargets()
+
+    pcall(function()
+        local rs = game:GetService("RunService")
+        if rs and rs.Heartbeat then
+            rs.Heartbeat:Connect(function() pcall(targetsTick) end)
+        else
+            spawn(function()
+                while true do
+                    pcall(targetsTick)
+                    wait(0.5)
+                end
+            end)
+        end
+    end)
 end
 
 -- ---------------------------------------------------------------
@@ -2839,6 +3027,7 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "toggle", id = "esp_hp", label = "Health bar" },
                 { kind = "toggle", id = "esp_shield", label = "Shield bar" },
                 { kind = "slider", id = "esp_dist", label = "Max dist", min = 0, max = 2000, fmt = "%d" },
+                { kind = "button", action = "selClear", label = "reset targets" },
             },
         },
         prediction = {
@@ -2951,6 +3140,13 @@ if menu then
         saveConfig(n)
         setAutoName(n)
         refreshFiles()
+    end)
+
+    menu.on("selClear", function()
+        menu.confirm("clear all selected targets?", function()
+            clearSel()
+            menu.redraw()
+        end)
     end)
 
     refreshFiles()
