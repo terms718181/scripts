@@ -62,8 +62,10 @@ local CFG = {
     gm_on = false,
     gm_key = 0x46,
     gm_mode = "toggle",
+    gm_method = "keys",
     gm_delay = 60,
     gm_link = false,
+    gm_link_ms = 0,
     gm_ammo = true,
     gm_dist_on = false, -- only spam guns whose own range reaches the nearest enemy
     gm_drop = false,
@@ -1018,6 +1020,9 @@ local function gmActive()
     if cfg("gm_link") then
         -- linked: only while the trigger has a target under the crosshair.
         if tbEngaged then return true end
+        -- a linger above 0 keeps the spam alive briefly after it disengages
+        local linger = (tonumber(cfg("gm_link_ms")) or 0) / 1000
+        if linger > 0 and (tick() - lastFireAt) <= linger then return true end
         -- the key works while linked too, because the trigger returns before it
         -- ever engages with a knife in hand, and cannot see past the gun's own
         -- check. it only counts at a player the crosshair is on: the macro is
@@ -1706,7 +1711,11 @@ local function gmStep()
     local delay = (tonumber(cfg("gm_delay")) or 60) / 1000
     gmNext = now + math.max(delay, 0.01)
 
-    gmStepKeys()
+    if cfg("gm_method") == "equip" then
+        gmStepEquip()
+    else
+        gmStepKeys()
+    end
 end
 
 local function gmStepSafe()
@@ -1798,7 +1807,7 @@ local function loadConfig(name)
                 CFG[k] = true
             elseif val == "false" then
                 CFG[k] = false
-            elseif k == "tb_kbmode" or k == "gm_mode" then
+            elseif k == "tb_kbmode" or k == "gm_mode" or k == "gm_method" then
                 -- string settings: numbers and booleans cannot carry them
                 CFG[k] = val
             end
@@ -3046,15 +3055,17 @@ local okNew, m = pcall(MenuLib.new, {
     sections = {
         { label = "Combat", items = {
             { label = "General", tab = 1 },
-        } },
-        { label = "Weapons", items = {
-            { label = "Guns", tab = 2 },
+            { label = "Weapons", tab = 2 },
         } },
         { label = "Target", items = {
             { label = "Targeting", tab = 3 },
+            { label = "Accuracy", tab = 4 },
+        } },
+        { label = "Behavior", items = {
+            { label = "Humanization", tab = 5 },
         } },
         { label = "Settings", items = {
-            { label = "Configs", tab = 4 },
+            { label = "Configs", tab = 6 },
         } },
     },
     tabs = {
@@ -3068,7 +3079,9 @@ local okNew, m = pcall(MenuLib.new, {
             { id = "gmguns", col = 2 },
         },
         [3] = { "sticky" },
-        [4] = { "profile", "saved" },
+        [4] = { "prediction", "bands" },
+        [5] = { "humanize", "hesitation" },
+        [6] = { "profile", "saved" },
     },
     cards = {
         main = {
@@ -3124,9 +3137,12 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "key", id = "gm_key", label = "Activation key" },
                 { kind = "cycle", id = "gm_mode", label = "Mode",
                     options = { "hold", "toggle", "always" } },
+                { kind = "cycle", id = "gm_method", label = "Method",
+                    options = { "keys", "equip" } },
                 { kind = "slider", id = "gm_delay", label = "Swap delay", min = 10, max = 400, fmt = "%dms" },
                 { kind = "toggle", id = "gm_dist_on", label = "Distance based" },
                 { kind = "toggle", id = "gm_link", label = "Link to triggerbot" },
+                { kind = "slider", id = "gm_link_ms", label = "Linger", min = 0, max = 500, fmt = "%dms" },
             },
         },
         gmguns = {
@@ -3140,11 +3156,56 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "slider", id = "gm_tac_slot", label = "Tac shotgun slot", min = 1, max = 9, fmt = "%d" },
             },
         },
+        prediction = {
+            title = "Prediction",
+            toggle = "tb_pred",
+            rows = {
+                { kind = "slider", id = "tb_pred_x", label = "X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_pred_y", label = "Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_pred_smooth", label = "Vel smooth", min = 0.0, max = 0.9, fmt = "%.2f" },
+                { kind = "toggle", id = "tb_dist_pred", label = "Distance based" },
+            },
+        },
+        bands = {
+            title = "Distance bands",
+            rows = {
+                { kind = "slider", id = "tb_close_dist", label = "Close dist", min = 1, max = 150, fmt = "%d" },
+                { kind = "slider", id = "tb_close_x", label = "Close X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_close_y", label = "Close Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_mid_dist", label = "Mid dist", min = 1, max = 300, fmt = "%d" },
+                { kind = "slider", id = "tb_mid_x", label = "Mid X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_mid_y", label = "Mid Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_far_x", label = "Far X", min = 0.0, max = 0.5, fmt = "%.3f" },
+                { kind = "slider", id = "tb_far_y", label = "Far Y", min = 0.0, max = 0.5, fmt = "%.3f" },
+            },
+        },
+        humanize = {
+            title = "Humanize",
+            toggle = "tb_humanize",
+            rows = {
+                { kind = "slider", id = "tb_delay_min", label = "React min", min = 0, max = 500, fmt = "%dms" },
+                { kind = "slider", id = "tb_delay_max", label = "React max", min = 0, max = 500, fmt = "%dms" },
+                { kind = "slider", id = "tb_int_min", label = "Interval min", min = 0, max = 1000, fmt = "%dms" },
+                { kind = "slider", id = "tb_int_max", label = "Interval max", min = 0, max = 1000, fmt = "%dms" },
+                { kind = "slider", id = "tb_hold_min", label = "Hold min", min = 0, max = 300, fmt = "%dms" },
+                { kind = "slider", id = "tb_hold_max", label = "Hold max", min = 0, max = 300, fmt = "%dms" },
+            },
+        },
+        hesitation = {
+            title = "Hesitation",
+            rows = {
+                { kind = "slider", id = "tb_hes_chance", label = "Chance", min = 0, max = 100, fmt = "%d%%" },
+                { kind = "slider", id = "tb_hes_min", label = "Min", min = 0, max = 2000, fmt = "%dms" },
+                { kind = "slider", id = "tb_hes_max", label = "Max", min = 0, max = 2000, fmt = "%dms" },
+                { kind = "slider", id = "tb_fatigue", label = "Fatigue", min = 0, max = 100, fmt = "%dms" },
+            },
+        },
         sticky = {
             title = "Sticky aim",
             toggle = "tb_sticky",
             rows = {
                 { kind = "key", id = "tb_selkey", label = "Select key" },
+                { kind = "key", id = "tb_unselkey", label = "Unselect key" },
                 { kind = "toggle", id = "tb_selvis", label = "Target visuals" },
                 { kind = "toggle", id = "esp_box", label = "Box" },
                 { kind = "toggle", id = "esp_name", label = "Name" },
