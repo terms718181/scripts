@@ -1460,7 +1460,7 @@ end
 local function updateESP()
     -- selected targets only, the same players the old target visuals drew for:
     -- nothing is painted for somebody you have not picked, and every feature
-    -- has its own toggle in the sticky aim card
+    -- has its own toggle in the Target card
     local cam = Workspace.CurrentCamera
     local lens = (cfg("tb_selvis") and cam) and lensInfo() or nil
     if not lens then
@@ -1996,29 +1996,31 @@ MenuLib.version = "1.0"
 
 -- Palette. Override any key with config.theme = { accent = ... }.
 MenuLib.theme = {
-    win = Color3.fromRGB(24, 27, 32),
-    winBorder = Color3.fromRGB(74, 112, 120),
-    side = Color3.fromRGB(19, 22, 27),
-    line = Color3.fromRGB(44, 48, 55),
-    top = Color3.fromRGB(24, 27, 32),
-    card = Color3.fromRGB(24, 27, 32),
-    cardBorder = Color3.fromRGB(64, 68, 76),
-    header = Color3.fromRGB(29, 32, 38),
+    win = Color3.fromRGB(18, 19, 21),
+    winBorder = Color3.fromRGB(56, 60, 66),
+    side = Color3.fromRGB(18, 19, 21),
+    line = Color3.fromRGB(48, 52, 58),
+    top = Color3.fromRGB(22, 23, 26),
+    card = Color3.fromRGB(22, 23, 26),
+    cardBorder = Color3.fromRGB(66, 70, 76),
+    header = Color3.fromRGB(26, 28, 32),
     accent = Color3.fromRGB(60, 158, 170),
-    text = Color3.fromRGB(236, 240, 246),
-    dim = Color3.fromRGB(205, 210, 217),
-    mute = Color3.fromRGB(138, 144, 153),
-    track = Color3.fromRGB(58, 62, 69),
-    knob = Color3.fromRGB(18, 20, 24),
-    titleText = Color3.fromRGB(226, 230, 236),
-    field = Color3.fromRGB(32, 35, 41),
-    fieldBorder = Color3.fromRGB(84, 88, 96),
-    box = Color3.fromRGB(32, 35, 41),
-    boxBorder = Color3.fromRGB(92, 96, 104),
+    text = Color3.fromRGB(234, 237, 241),
+    dim = Color3.fromRGB(206, 211, 217),
+    mute = Color3.fromRGB(128, 134, 142),
+    track = Color3.fromRGB(70, 75, 82),
+    well = Color3.fromRGB(12, 13, 15),
+    knob = Color3.fromRGB(214, 218, 224),
+    titleText = Color3.fromRGB(206, 211, 217),
+    field = Color3.fromRGB(52, 55, 59),
+    fieldBorder = Color3.fromRGB(0, 0, 0),
+    box = Color3.fromRGB(18, 19, 21),
+    boxBorder = Color3.fromRGB(0, 0, 0),
     hot = Color3.fromRGB(60, 158, 170),
-    hi = Color3.fromRGB(34, 38, 44),
+    hi = Color3.fromRGB(38, 41, 46),
     edge = Color3.fromRGB(48, 52, 59),
-    handle = Color3.fromRGB(186, 192, 199),
+    handle = Color3.fromRGB(214, 218, 224),
+    caption = Color3.fromRGB(88, 130, 176),
 }
 
 -- Back to the rounded face this menu had before. Swap for SystemBold,
@@ -2149,28 +2151,42 @@ function MenuLib.new(config)
     local title = config.title or "MENU"
     local listeners = {}
 
-    local TOPBAR = 28   -- caption strip; dragging it moves the window
-    local TABBAR = 30   -- tab strip across the content column
-    local SIDEBAR = config.sidebar or 112
+    local HEADER = 78   -- name strip + tab field; drag it to move the window
+    local NAMEROW = 40  -- software name above the tab field
+    local TABROW = 38   -- tab field height, one bordered group as in the reference
+    local SIDEBAR = config.sidebar or 96
     local PADX = 12
     local PADB = 14   -- breathing room under the last card
-    local CARD_HDR = 26
-    local ROW_H = 24
+    local CARD_TITLE = 20  -- muted card name, printed above the card box
+    local ROW_H = 25
 
     local M = {
         open = config.open ~= false,
         x = config.x or 80,
         y = config.y or 80,
-        w = config.w or 560,
+        w = config.w or 520,
         h = config.h or 240,
     }
+
+    -- The menu is laid out in design pixels and scaled once, at draw time, so the
+    -- whole thing - text, boxes, spacing - shrinks together instead of just the
+    -- frame. Input converts the mouse back to design space, so every hit box
+    -- stays exactly where its box is drawn. Set config.scale to taste.
+    local SC = config.scale or 0.8
+    local function dsx(v) return M.x + (v - M.x) * SC end
+    local function dsy(v) return M.y + (v - M.y) * SC end
+    local function tsx(v) return M.x + (v - M.x) / SC end
+    local function tsy(v) return M.y + (v - M.y) / SC end
 
     if values.menuKey == nil then values.menuKey = config.key or 0x4B end
     if values.menuKeyName == nil then
         values.menuKeyName = config.keyName or MenuLib.keyName(values.menuKey)
     end
 
+    -- a saved tab that no longer exists (a page was removed) falls back to the
+    -- first one instead of drawing an empty menu
     local CUR_TAB = config.tab or 1
+    if not (tabs and tabs[CUR_TAB]) then CUR_TAB = 1 end
     local HITS = {}
     local dirty = true
     local listeningId = nil -- bind row waiting for the user to press a key
@@ -2245,9 +2261,9 @@ function MenuLib.new(config)
             tr.Thickness = 1
             TRI[triN] = tr
         end
-        tr.PointA = Vector2.new(ax, ay)
-        tr.PointB = Vector2.new(bx, by)
-        tr.PointC = Vector2.new(cx, cy)
+        tr.PointA = Vector2.new(dsx(ax), dsy(ay))
+        tr.PointB = Vector2.new(dsx(bx), dsy(by))
+        tr.PointC = Vector2.new(dsx(cx), dsy(cy))
         tr.Color = color
         tr.ZIndex = z or 12
         tr.Visible = true
@@ -2266,15 +2282,17 @@ function MenuLib.new(config)
             pcall(function() s.Rounding = 4 end)
             SQ_ROUND[sqN] = s
         end
-        s.Position = Vector2.new(x, y)
-        s.Size = Vector2.new(w, h)
+        s.Position = Vector2.new(math.floor(dsx(x) + 0.5), math.floor(dsy(y) + 0.5))
+        -- never scale an edge below one pixel: a 1px outline becomes 0.8px and
+        -- stops drawing, which killed every horizontal side of a box
+        s.Size = Vector2.new(math.max(1, math.floor(w * SC + 0.5)), math.max(1, math.floor(h * SC + 0.5)))
         s.Color = color
         s.ZIndex = z or 10
         s.Visible = true
         return s
     end
 
-    local function pq(x, y, w, h, color, z)
+    local function pqRaw(x, y, w, h, color, z)
         spN = spN + 1
         local s = SQ_PLAIN[spN]
         if not s then
@@ -2293,11 +2311,44 @@ function MenuLib.new(config)
         return s
     end
 
+    -- Design-space rect: anything that does not need pixel-exact edges.
+    local function pq(x, y, w, h, color, z)
+        return pqRaw(math.floor(dsx(x) + 0.5), math.floor(dsy(y) + 0.5),
+            math.max(1, math.floor(w * SC + 0.5)), math.max(1, math.floor(h * SC + 0.5)), color, z)
+    end
+
+    -- Outline a rect pixel-exactly: the rect is snapped once and all four edges
+    -- come from those numbers, so no side can round away from the others.
     local function stroke(x, y, w, h, color, z)
-        pq(x, y, w, 1, color, z)
-        pq(x, y + h - 1, w, 1, color, z)
-        pq(x, y + 1, 1, h - 2, color, z)
-        pq(x + w - 1, y + 1, 1, h - 2, color, z)
+        local px, py = math.floor(dsx(x) + 0.5), math.floor(dsy(y) + 0.5)
+        local pw, ph = math.max(3, math.floor(w * SC + 0.5)), math.max(3, math.floor(h * SC + 0.5))
+        pqRaw(px, py, pw, 1, color, z)
+        pqRaw(px, py + ph - 1, pw, 1, color, z)
+        pqRaw(px, py + 1, 1, ph - 2, color, z)
+        pqRaw(px + pw - 1, py + 1, 1, ph - 2, color, z)
+    end
+
+    -- The one primitive behind every clickable box in this menu: grey inside,
+    -- black edge, teal when on. Fill first, edge one layer above, so the frame
+    -- can never be painted over and no box can drift out of step with another.
+    local function box(px, py, w, h, on, z)
+        local zz = z or 11
+        -- Snap the box to whole screen pixels once, then build the frame from
+        -- those same numbers: deriving each edge separately let rounding move
+        -- them a pixel apart, so an edge would drop out at scaled sizes.
+        local x, y = math.floor(dsx(px) + 0.5), math.floor(dsy(py) + 0.5)
+        local bw, bh = math.max(3, math.floor(w * SC + 0.5)), math.max(3, math.floor(h * SC + 0.5))
+        pqRaw(x, y, bw, bh, on and T.accent or T.field, zz)
+        pqRaw(x, y, bw, 1, T.boxBorder, zz + 1)
+        pqRaw(x, y + bh - 1, bw, 1, T.boxBorder, zz + 1)
+        pqRaw(x, y + 1, 1, bh - 2, T.boxBorder, zz + 1)
+        pqRaw(x + bw - 1, y + 1, 1, bh - 2, T.boxBorder, zz + 1)
+    end
+
+    -- 12px outer with the ring inside it, so the visible fill is 10px and the
+    -- black frame still reads when the box is ticked and filled with accent.
+    local function checkbox(px, py, on, z)
+        box(px, py, 12, 12, on, z)
     end
 
     local function tx(x, y, text, size, color, center, z)
@@ -2312,8 +2363,8 @@ function MenuLib.new(config)
             pcall(function() t.Font = FONT end)
             TX_POOL[txtN] = t
         end
-        t.Position = Vector2.new(x, y)
-        t.Size = size
+        t.Position = Vector2.new(math.floor(dsx(x) + 0.5), math.floor(dsy(y) + 0.5))
+        t.Size = (size or 12) * SC
         t.Color = color
         t.Center = center == true
         t.Text = text
@@ -2345,19 +2396,20 @@ function MenuLib.new(config)
     -- ---------------------------------------------------------------
     local function rowHeight(row)
         local k = row.kind
-        if k == "cycle" or k == "text" then return 36 end
-        if k == "slider" then return 32 end
-        if k == "button" then return 26 end
-        if k == "note" then return 18 end
-        return 24
+        if k == "cycle" or k == "text" then return 50 end
+        if k == "slider" then return 46 end
+        if k == "button" then return 32 end
+        if k == "note" then return 22 end
+        if k == "file" then return 28 end
+        return 27
     end
 
     local function cardHeight(card)
-        local h = 8 + CARD_HDR + 10
+        local h = CARD_TITLE + 8
         for _, row in ipairs(card.rows or {}) do
             h = h + rowHeight(row)
         end
-        return h
+        return h + 8
     end
 
     -- Real glyph widths, straight from the VM. The old 0.52-per-pixel guess
@@ -2383,40 +2435,47 @@ function MenuLib.new(config)
         return #s * (size * 0.74) + 4
     end
 
-    local function drawCard(id, x, y, w)
+    local function drawCard(id, x, y, w, fillTo)
         local card = cards[id]
         if not card then return 0 end
+        -- whole pixels only: fractional edges render as soft two-pixel borders
+        x, w = math.floor(x + 0.5), math.floor(w + 0.5)
         local rows = card.rows or {}
         local h = cardHeight(card)
-        local by0 = y + 8
+        -- columns are finished to a common length: a short card's box is padded
+        -- out, so the two columns end on the same line as in the reference
+        if fillTo and fillTo > h then h = math.floor(fillTo) end
 
-        -- Flat panel, hairline border, washed header strip with a rule under it.
-        pq(x, by0, w, h - 8, T.card, 10)
-        pq(x + 1, by0 + 1, w - 2, CARD_HDR - 1, T.header, 10)
-        stroke(x, by0, w, h - 8, T.cardBorder, 11)
-        pq(x + 1, by0 + CARD_HDR, w - 2, 1, T.line, 11)
+        -- Name above the box, muted, the way the reference titles its cards.
+        tx(x + 7, y + 2, card.title or id, 12, T.mute, false, 12)
 
-        local label = card.title or id
-        tx(x + 14, by0 + 7, label, 11, T.text, false, 12)
+        local by0 = y + CARD_TITLE
+        local bh = h - CARD_TITLE
+        pq(x, by0, w, bh, T.card, 10)
+        stroke(x, by0, w, bh, T.cardBorder, 11)
 
+        -- Card switch sits on the title line, outside the box. It gets a well
+        -- of its own: filling it with the window colour made the off state
+        -- vanish into the title band, leaving a live hitbox with nothing drawn.
         if card.toggle then
             local on = values[card.toggle] == true
-            local bx, byy = x + w - 24, by0 + 8
-            pq(bx, byy, 10, 10, on and T.accent or T.box, 12)
-            stroke(bx, byy, 10, 10, on and T.accent or T.boxBorder, 12)
-            if on then pq(x + 1, by0 + 1, 2, h - 10, T.accent, 11) end
-            HITS[#HITS + 1] = { x = bx - 6, y = byy - 5, w = 22, h = 20, kind = "toggle", id = card.toggle }
+            local bx, byy = x + w - 14, y + 3
+            checkbox(bx, byy, on, 13)
+            HITS[#HITS + 1] = { x = bx - 8, y = byy - 6, w = 25, h = 23, kind = "toggle", id = card.toggle }
         end
 
-        local ix = x + 14
-        local iw = w - 28
-        local ry = by0 + CARD_HDR + 4
+        local ix = x + 13
+        -- content stops short of the right edge, leaving the margin the
+        -- reference leaves beside its tracks, fields and numbers
+        local iw = w - 50
+        local ry = by0 + 6
         for _, row in ipairs(rows) do
             if row.kind == "toggle" then
                 local on = values[row.id] == true
-                pq(ix, ry + 7, 10, 10, on and T.accent or T.box, 11)
-                stroke(ix, ry + 7, 10, 10, on and T.accent or T.boxBorder, 11)
-                tx(ix + 19, ry + 5, row.label or row.id, 11, T.dim, false, 11)
+                -- filled well, not the card colour: an off box must still read
+                -- as a box you can click
+                checkbox(ix, ry + 8, on, 11)
+                tx(ix + 20, ry + 7, row.label or row.id, 12, T.dim, false, 11)
                 HITS[#HITS + 1] = { x = ix - 4, y = ry, w = iw + 8, h = rowHeight(row), kind = "toggle", id = row.id }
             elseif row.kind == "slider" then
                 local lo = row.min or 0
@@ -2429,89 +2488,102 @@ function MenuLib.new(config)
                 if f < 0 then f = 0 elseif f > 1 then f = 1 end
                 local hot = editing ~= nil and editing.id == row.id
                 local shown = hot and editing.buf or fmtNum(fmt, val)
-                local vw = approxW(shown, 11)
-                local vx = x + w - 14 - vw
+                local vw = approxW(shown, 12)
+                -- The bar runs wider than the label column and ends level with the
+                -- value, just inside the card's right padding.
+                local bw = iw + 14
+                local vx = ix + bw - vw
                 -- Snug input field, only as wide as the digits need. The text
                 -- and caret sit above it so nothing hides what you type.
                 if hot then
                     local boxW = vw + 14
                     if boxW < 34 then boxW = 34 end
-                    local boxX = x + w - 8 - boxW
-                    pq(boxX, ry - 1, boxW, 17, T.field, 12)
-                    stroke(boxX, ry - 1, boxW, 17, T.accent, 12)
+                    local boxX = vx - 7
+                    box(boxX, ry - 1, boxW, 19, false, 12)
                 end
-                tx(ix, ry + 2, row.label or row.id, 11, T.text, false, 11)
-                tx(vx, ry + 1, shown, 11, T.text, false, hot and 13 or 11)
-                if hot then pq(vx + vw + 1, ry + 3, 1, 10, T.accent, 13) end
-                -- Recessed track: dark inset inside a hairline edge, teal fill
-                -- from the left, small markers outside both ends.
-                local barY = ry + 21
-                local barH = 7
-                pq(ix, barY, iw, barH, T.track, 11)
-                pq(ix + 1, barY + 1, iw - 2, barH - 2, T.knob, 11)
-                local fillW = (iw - 2) * f
-                if fillW > 0 then pq(ix + 1, barY + 1, fillW, barH - 2, T.accent, 12) end
-                pq(ix - 6, barY + 3, 3, 1, T.mute, 11)
-                pq(ix + iw + 3, barY + 3, 3, 1, T.mute, 11)
-                HITS[#HITS + 1] = { x = ix - 4, y = ry + 18, w = iw + 8, h = 13, kind = "slider", id = row.id,
-                    min = lo, max = hi, fmt = fmt, tx = ix, tw = iw }
+                tx(ix, ry + 2, row.label or row.id, 12, T.text, false, 11)
+                tx(vx, ry + 2, shown, 12, T.text, false, hot and 13 or 11)
+                if hot then pq(vx + vw + 1, ry + 4, 1, 11, T.accent, 13) end
+                -- Slider: a black-framed slot with a black interior, teal up to
+                -- the value, no knob, and a small plus capping each end. The
+                -- fill is inset by that frame, so it stays black when the bar is
+                -- full and the two halves are always the same thickness.
+                local barY = ry + 19
+                local sx0 = math.floor(dsx(ix) + 0.5)
+                local sy0 = math.floor(dsy(barY) + 0.5)
+                local sw0 = math.max(4, math.floor(bw * SC + 0.5))
+                local sh0 = math.max(5, math.floor(7 * SC + 0.5))
+                pqRaw(sx0, sy0, sw0, sh0, T.boxBorder, 11)
+                -- black interior for the whole slot, so the empty part of the bar
+                -- is black like the frame, not a grey line across the card
+                pqRaw(sx0 + 1, sy0 + 1, sw0 - 2, sh0 - 2, T.well, 11)
+                local fillW = math.floor(bw * f)
+                -- clamped to the inner width: the fill can never be wider than the
+                -- slot, which is what let teal spill across the frame on big values
+                local fw0 = math.floor(fillW * SC + 0.5) - 2
+                if fw0 > sw0 - 2 then fw0 = sw0 - 2 end
+                if fw0 >= 1 then pqRaw(sx0 + 1, sy0 + 1, fw0, sh0 - 2, T.accent, 12) end
+                pq(ix - 7, barY + 3, 5, 1, T.mute, 11)
+                pq(ix - 5, barY, 1, 7, T.mute, 11)
+                pq(ix + bw + 2, barY + 3, 5, 1, T.mute, 11)
+                pq(ix + bw + 4, barY, 1, 7, T.mute, 11)
+                HITS[#HITS + 1] = { x = ix - 6, y = barY - 6, w = bw + 12, h = 20, kind = "slider", id = row.id,
+                    min = lo, max = hi, fmt = fmt, tx = ix, tw = bw }
                 -- appended last so the value box wins over the bar it sits on
                 -- wide, forgiving target: anywhere on the value opens the editor
-                HITS[#HITS + 1] = { x = x + w - 96, y = ry - 3, w = 84, h = 19, kind = "numedit",
+                HITS[#HITS + 1] = { x = ix + bw - 84, y = ry - 3, w = 84, h = 21, kind = "numedit",
                     id = row.id, min = lo, max = hi, fmt = fmt }
             elseif row.kind == "key" then
-                tx(ix, ry + 5, row.label or row.id, 11, T.dim, false, 11)
+                tx(ix, ry + 7, row.label or row.id, 12, T.dim, false, 11)
                 local hot = listeningId == row.id
                 local shown = values[row.id .. "Name"] or MenuLib.keyName(values[row.id])
                 local txt = hot and "[ ... ]" or ("[ " .. shown .. " ]")
-                local bw = approxW(txt, 10)
-                local bx = x + w - 14 - bw
-                if hot then pq(bx - 4, ry + 4, bw + 8, 15, T.hot, 11) end
-                tx(bx, ry + 5, txt, 10, hot and T.knob or T.mute, false, 12)
-                HITS[#HITS + 1] = { x = bx - 6, y = ry, w = bw + 12, h = rowHeight(row), kind = "key", id = row.id }
+                local bw = approxW(txt, 11)
+                local bx = ix + iw - bw
+                -- the bind is clickable, so it sits in a field that is visible
+                -- whether or not it is being rebound
+                box(bx - 6, ry + 4, bw + 12, 20, hot, 11)
+                tx(bx, ry + 7, txt, 11, hot and T.win or T.dim, false, 12)
+                HITS[#HITS + 1] = { x = bx - 8, y = ry, w = bw + 16, h = rowHeight(row), kind = "key", id = row.id }
             elseif row.kind == "cycle" then
                 local opts = row.options or {}
-                tx(ix, ry, row.label or row.id, 10, T.mute, false, 11)
-                local fy = ry + 16
-                pq(ix, fy, iw, 18, T.field, 11)
-                stroke(ix, fy, iw, 18, T.fieldBorder, 11)
-                tx(ix + 8, fy + 4, tostring(values[row.id] or "-"), 10, T.text, false, 12)
-                tri(ix + iw - 14, fy + 7, ix + iw - 6, fy + 7, ix + iw - 10, fy + 11, T.mute, 12)
-                HITS[#HITS + 1] = { x = ix, y = fy - 2, w = iw, h = 22, kind = "cycle",
-                    id = row.id, options = opts, fx = ix, fy = fy, fw = iw, fh = 18 }
+                tx(ix, ry + 2, row.label or row.id, 10, T.mute, false, 11)
+                local fy = ry + 20
+                box(ix, fy, iw, 22, false, 11)
+                tx(ix + 9, fy + 6, tostring(values[row.id] or "-"), 11, T.text, false, 12)
+                tri(ix + iw - 16, fy + 9, ix + iw - 8, fy + 9, ix + iw - 12, fy + 14, T.dim, 12)
+                HITS[#HITS + 1] = { x = ix, y = fy - 2, w = iw, h = 26, kind = "cycle",
+                    id = row.id, options = opts, fx = ix, fy = fy, fw = iw, fh = 22 }
             elseif row.kind == "text" then
                 local hot = editing and editing.id == row.id
-                tx(ix, ry, row.label or row.id, 10, T.mute, false, 11)
-                local fy = ry + 16
-                pq(ix, fy, iw, 18, T.field, 11)
-                stroke(ix, fy, iw, 18, hot and T.accent or T.fieldBorder, 11)
-                tx(ix + 8, fy + 4, hot and (editing.buf .. "_") or tostring(values[row.id] or ""),
-                    10, T.text, false, 12)
-                HITS[#HITS + 1] = { x = ix, y = fy - 2, w = iw, h = 22, kind = "text", id = row.id }
+                tx(ix, ry + 2, row.label or row.id, 10, T.mute, false, 11)
+                local fy = ry + 20
+                box(ix, fy, iw, 22, false, 11)
+                tx(ix + 9, fy + 6, hot and (editing.buf .. "_") or tostring(values[row.id] or ""),
+                    11, T.text, false, 12)
+                HITS[#HITS + 1] = { x = ix, y = fy - 2, w = iw, h = 26, kind = "text", id = row.id }
             elseif row.kind == "button" then
-                local fy = ry + 3
-                pq(ix, fy, iw, 20, T.field, 11)
-                stroke(ix, fy, iw, 20, T.fieldBorder, 11)
-                tx(ix + iw / 2, fy + 4, row.label or row.id, 10, T.text, true, 12)
-                HITS[#HITS + 1] = { x = ix, y = fy, w = iw, h = 20, kind = "button", id = row.action or row.id }
+                local fy = ry + 5
+                box(ix, fy, iw, 22, false, 11)
+                tx(ix + iw / 2, fy + 6, row.label or row.id, 11, T.dim, true, 12)
+                HITS[#HITS + 1] = { x = ix, y = fy, w = iw, h = 22, kind = "button", id = row.action or row.id }
             elseif row.kind == "note" then
-                tx(ix, ry + 4, row.label or "", 10, T.mute, false, 11)
+                tx(ix, ry + 6, row.label or "", 10, T.mute, false, 11)
             elseif row.kind == "file" then
                 local fname = values[row.id]
-                tx(ix, ry + 4, fname and tostring(fname) or (row.label or ""), 10,
+                tx(ix, ry + 8, fname and tostring(fname) or (row.label or ""), 11,
                     fname and T.text or T.mute, false, 11)
                 if fname then
-                    local bw, bh, gap = 30, 16, 4
-                    local bx = x + w - 12 - (bw * 3 + gap * 2)
+                    local bw, bh, gap = 34, 19, 4
+                    local bx = ix + iw - (bw * 3 + gap * 2)
                     local acts = { "load", "save", "del" }
                     for ai = 1, 3 do
                         local ax = bx + (ai - 1) * (bw + gap)
                         local last = ai == 3
-                        pq(ax, ry + 2, bw, bh, T.field, 11)
-                        stroke(ax, ry + 2, bw, bh, T.fieldBorder, 11)
-                        tx(ax + bw / 2, ry + 5, last and "x" or acts[ai], 10,
-                            last and T.mute or T.accent, true, 12)
-                        HITS[#HITS + 1] = { x = ax, y = ry, w = bw, h = bh + 4, kind = "fileact",
+                        box(ax, ry + 5, bw, bh, false, 11)
+                        tx(ax + bw / 2, ry + 9, last and "x" or acts[ai], 10,
+                            last and T.mute or T.dim, true, 12)
+                        HITS[#HITS + 1] = { x = ax, y = ry + 3, w = bw, h = bh + 4, kind = "fileact",
                             id = row.id, act = acts[ai], name = fname }
                     end
                 end
@@ -2552,9 +2624,32 @@ function MenuLib.new(config)
         return count, nat, 12, math.max(nat[1], nat[2]), two, { 0, 0 }
     end
 
+    -- Tallest content any tab can produce, stacked-card gaps included, so the
+    -- window keeps one size and never jumps when you change page.
+    local function tallestContent()
+        local best = 0
+        for _, list in pairs(tabs) do
+            local count, nat = { 0, 0 }, { 0, 0 }
+            for i = 1, #list do
+                local col = tabCol(list[i], i)
+                if col > 2 then col = 2 end
+                local card = cards[tabId(list[i])]
+                if card then
+                    count[col] = count[col] + 1
+                    nat[col] = nat[col] + cardHeight(card)
+                end
+            end
+            for c = 1, 2 do
+                local total = nat[c]
+                if count[c] > 1 then total = total + (count[c] - 1) * 12 end
+                if total > best then best = total end
+            end
+        end
+        return best
+    end
+
     local function requiredHeight()
-        local _, _, _, contentH = tabMetrics()
-        local need = TOPBAR + TABBAR + 13 + contentH + PADB
+        local need = HEADER + 14 + tallestContent() + PADB
         if need < (config.h or 0) then need = config.h end
         return need
     end
@@ -2576,81 +2671,114 @@ function MenuLib.new(config)
             end
         end
 
-        -- flat window, a single teal hairline all round
+        -- Flat near-black window, plain grey hairline all round, with the thin
+        -- teal accent the reference runs along its very top edge.
         pq(x, y, w, h, T.win, 8)
-        stroke(x, y, w, h, T.winBorder, 8)
+        stroke(x, y, w, h, T.winBorder, 9)
+        pq(x, y, w, 2, T.accent, 12)
 
-        -- caption, teal and hard against the left edge like the reference
-        tx(x + 14, y + 8, title, 11, T.accent, false, 11)
-        pq(x, y + TOPBAR, w, 1, T.line, 9)
-
-        -- darker module column down the left, divider on its right
-        local sbTop = y + TOPBAR + 1
-        pq(x + 1, sbTop, SW - 1, h - TOPBAR - 2, T.side, 9)
-        pq(x + SW, sbTop, 1, h - TOPBAR - 1, T.line, 9)
-        local ly = sbTop + 12
-        for i = 1, #sections do
-            local active = i == secIdx
-            if active then
-                pq(x + 2, ly - 6, SW - 3, 25, T.hi, 9)
-                pq(x + 2, ly - 6, 2, 25, T.accent, 10)
-            end
-            tx(x + 16, ly, sections[i].label or "", 11, active and T.text or T.mute, false, 11)
-            HITS[#HITS + 1] = { x = x, y = ly - 6, w = SW, h = 25, kind = "ptab", section = i }
-            ly = ly + 30
-        end
-
-        -- tab pills along the top of the content column
+        -- Header: the reference gives this no bar of its own. The software name
+        -- sits in the content column and the tabs sit in a bordered field under
+        -- it, so the name reads as a heading over its own tabs.
         local cx = x + SW + 1
         local cw = w - SW - 1
-        local tabY = sbTop
+        tx(cx + PADX, y + 18, title, 12, T.caption, false, 11)
+        -- hairline between the modules and the content, like the reference's
+        -- column rule; it starts level with the tab field
+        pq(x + SW, y + 8, 1, h - 9, T.cardBorder, 10)
+
         local subs = (sections[secIdx] or {}).items or {}
-        local ptx = cx + PADX
+        -- The tabs are one bordered field under the name, the reference's group
+        -- box. No box on the current tab: it is simply the white label.
+        local fx, fy = cx + PADX, y + NAMEROW
+        local fw = cw - PADX * 2
+        stroke(fx, fy, fw, TABROW, T.cardBorder, 10)
+        local ptx = fx + 14
         for i = 1, #subs do
             local item = subs[i]
             local active = item.tab == CUR_TAB
-            local pw = approxW(item.label or "", 11) + 26
-            if active then
-                pq(ptx, tabY + 5, pw, TABBAR - 10, T.hi, 10)
-                pq(ptx, tabY + TABBAR - 3, pw, 2, T.accent, 11)
-            end
-            tx(ptx + 13, tabY + 9, item.label or "", 11, active and T.text or T.mute, false, 11)
-            HITS[#HITS + 1] = { x = ptx, y = tabY, w = pw, h = TABBAR, kind = "tab", id = item.tab }
-            ptx = ptx + pw + 4
+            local lw = approxW(item.label or "", 12)
+            tx(ptx, fy + 13, item.label or "", 12, active and T.text or T.mute, false, 11)
+            HITS[#HITS + 1] = { x = ptx - 8, y = fy, w = lw + 16, h = TABROW, kind = "tab", id = item.tab }
+            ptx = ptx + lw + 31
         end
-        pq(cx, tabY + TABBAR, cw, 1, T.line, 9)
+
+        -- Thin bordered strip in the top corner of the module column, as the
+        -- reference has it.
+        stroke(x + 1, y + 8, SW - 2, 12, T.cardBorder, 10)
+
+        -- Module column: flat, no fills and no rules between the rows. Only the
+        -- current page's cell is outlined, using the same border colour as the
+        -- strip above it and the column rule beside it, so all three join up.
+        local ly = y + 58
+        for i = 1, #sections do
+            local active = i == secIdx
+            -- The current module is outlined, not just underlined: its cell shares
+            -- the column rule on the right and the strip line on top, so the box
+            -- opens into the section the way the reference's does.
+            if active then
+                local ct = y + 20 + (i - 1) * 74
+                -- on the first module the strip's own bottom line is the top edge,
+                -- so the two read as one continuous outline
+                if i > 1 then pq(x + 1, ct, SW - 1, 1, T.cardBorder, 10) end
+                pq(x + 1, ct, 1, 74, T.cardBorder, 10)
+                pq(x + 1, ct + 73, SW - 1, 1, T.cardBorder, 10)
+            end
+            -- same size and face as the tab labels, so the column reads as one
+            -- family with the header instead of looking heavier
+            tx(x + 18, ly, sections[i].label or "", 12, active and T.text or T.mute, false, 11)
+            HITS[#HITS + 1] = { x = x, y = ly - 12, w = SW, h = 38, kind = "ptab", section = i }
+            ly = ly + 74
+        end
 
         -- cards: two even columns, top aligned, sized to their rows
         local list = tabs[CUR_TAB] or {}
         local availW = cw - PADX * 2
-        local _, _, gap, _, two, off = tabMetrics()
-        local colW = two and (availW - PADX) / 2 or availW
-        local cy0 = tabY + TABBAR + 12
+        local count, nat, gap, _, two, off = tabMetrics()
+        local GUTTER = 24  -- wide gutter between the two columns, as in the reference
+        local colW = math.floor(two and (availW - GUTTER) / 2 or availW)
+        local cy0 = y + HEADER + 14
         local colY = { cy0 + off[1], cy0 + off[2] }
+        -- Measure each column so single-card pages can finish both boxes on the
+        -- same line. Stacked columns are left alone and keep their own heights.
+        local lastAt, colH = { 0, 0 }, { 0, 0 }
         for i = 1, #list do
             local col = tabCol(list[i], i)
             if col > 2 then col = 2 end
-            col = col - 1
-            local ch = drawCard(tabId(list[i]), cx + PADX + col * (colW + PADX), colY[col + 1], colW)
-            colY[col + 1] = colY[col + 1] + ch + gap
+            lastAt[col] = i
+            colH[col] = nat[col] + (count[col] > 1 and (count[col] - 1) * gap or 0)
+        end
+        local targetH = colH[1] > colH[2] and colH[1] or colH[2]
+        -- Only level the columns when each side is a single card. Stretching the
+        -- last card of a stacked column leaves one huge empty box, which reads as
+        -- a bug; stacked columns keep their natural heights instead.
+        local padColumns = count[1] <= 1 and count[2] <= 1
+        for i = 1, #list do
+            local col = tabCol(list[i], i)
+            if col > 2 then col = 2 end
+            local ci = col - 1
+            local pad
+            if padColumns and i == lastAt[col] then pad = cy0 + targetH - colY[ci + 1] end
+            local ch = drawCard(tabId(list[i]), cx + PADX + ci * (colW + GUTTER), colY[ci + 1], colW, pad)
+            colY[ci + 1] = colY[ci + 1] + ch + gap
         end
 
         -- open option list, drawn over the cards and flipped up when the field
         -- sits too close to the bottom edge
         if dropdown then
             local opts = dropdown.options or {}
-            local orowH = 20
+            local orowH = 22
             local bw = dropdown.fw
             local dropH = #opts * orowH + 2
             local dy = dropdown.fy + dropdown.fh + 2
             if dy + dropH > y + h - 4 then dy = dropdown.fy - dropH - 2 end
-            pq(dropdown.fx, dy, bw, dropH, T.win, 13)
-            stroke(dropdown.fx, dy, bw, dropH, T.fieldBorder, 13)
+            pq(dropdown.fx, dy, bw, dropH, T.card, 13)
+            stroke(dropdown.fx, dy, bw, dropH, T.cardBorder, 14)
             for i = 1, #opts do
                 local oy = dy + 1 + (i - 1) * orowH
                 local sel = values[dropdown.id] == opts[i]
                 if sel then pq(dropdown.fx + 1, oy, bw - 2, orowH - 1, T.hi, 13) end
-                tx(dropdown.fx + 9, oy + 4, tostring(opts[i]), 10, sel and T.accent or T.dim, false, 14)
+                tx(dropdown.fx + 9, oy + 5, tostring(opts[i]), 11, sel and T.text or T.dim, false, 14)
                 HITS[#HITS + 1] = { x = dropdown.fx, y = oy, w = bw, h = orowH,
                     kind = "dropdownitem", value = opts[i] }
             end
@@ -2668,7 +2796,7 @@ function MenuLib.new(config)
             local by = y + (h - bh) / 2
             -- panel with a header strip, so it reads as its own surface
             pq(bx, by, bw, bh, T.win, 13)
-            stroke(bx, by, bw, bh, T.winBorder, 13)
+            stroke(bx, by, bw, bh, T.winBorder, 14)
             pq(bx + 1, by + 1, bw - 2, 24, T.header, 13)
             pq(bx + 1, by + 25, bw - 2, 1, T.cardBorder, 13)
             tx(bx + 12, by + 5, "CONFIRM", 10, T.mute, false, 14)
@@ -2686,10 +2814,8 @@ function MenuLib.new(config)
             local yy = by + bh - yh - 14
             local nx = bx + bw - 14 - yw
             local yx = nx - 10 - yw
-            pq(yx, yy, yw, yh, T.accent, 14)
-            stroke(yx, yy, yw, yh, T.accent, 14)
-            pq(nx, yy, yw, yh, T.field, 14)
-            stroke(nx, yy, yw, yh, T.fieldBorder, 14)
+            box(yx, yy, yw, yh, true, 14)
+            box(nx, yy, yw, yh, false, 14)
             tx(yx + yw / 2, yy + 4, "yes", 10, T.text, true, 15)
             tx(nx + yw / 2, yy + 4, "no", 10, T.text, true, 15)
             HITS[#HITS + 1] = { x = yx, y = yy, w = yw, h = yh, kind = "confirmyes" }
@@ -2731,7 +2857,7 @@ function MenuLib.new(config)
     end
 
     local function applySlider(hit, mx)
-        local f = (mx - hit.tx) / hit.tw
+        local f = (tsx(mx) - hit.tx) / hit.tw
         if f < 0 then f = 0 elseif f > 1 then f = 1 end
         local val = hit.min + (hit.max - hit.min) * f
         if isIntFmt(hit.fmt) then val = math.floor(val + 0.5) end
@@ -2741,6 +2867,7 @@ function MenuLib.new(config)
     -- Later hits are drawn on top (the confirm modal over the cards), so the
     -- topmost one wins a click.
     local function hitAt(mx, my)
+        mx, my = tsx(mx), tsy(my)
         for i = #HITS, 1, -1 do
             local h = HITS[i]
             if mx >= h.x and mx <= h.x + h.w and my >= h.y and my <= h.y + h.h then return h end
@@ -2919,12 +3046,15 @@ function MenuLib.new(config)
                 end
                 dropdown = nil
                 dirty = true
-            elseif mx >= M.x and mx <= M.x + M.w and my >= M.y and my <= M.y + TOPBAR then
-                dragging = true
-                dragOffX, dragOffY = mx - M.x, my - M.y
             else
                 local hit = hitAt(mx, my)
-                if hit then
+                -- the whole header bar drags, but a tab sitting on it still
+                -- wins the click instead of starting a drag
+                if not hit and mx >= M.x and mx <= M.x + M.w * SC
+                    and my >= M.y and my <= M.y + HEADER * SC then
+                    dragging = true
+                    dragOffX, dragOffY = mx - M.x, my - M.y
+                elseif hit then
                     if hit.kind == "ptab" then
                         local sec = sections[hit.section]
                         if sec and sec.items and sec.items[1] then
@@ -3059,7 +3189,6 @@ local okNew, m = pcall(MenuLib.new, {
         } },
         { label = "Target", items = {
             { label = "Targeting", tab = 3 },
-            { label = "Accuracy", tab = 4 },
         } },
         { label = "Behavior", items = {
             { label = "Humanization", tab = 5 },
@@ -3079,7 +3208,6 @@ local okNew, m = pcall(MenuLib.new, {
             { id = "gmguns", col = 2 },
         },
         [3] = { "sticky" },
-        [4] = { "prediction", "bands" },
         [5] = { "humanize", "hesitation" },
         [6] = { "profile", "saved" },
     },
@@ -3201,7 +3329,7 @@ local okNew, m = pcall(MenuLib.new, {
             },
         },
         sticky = {
-            title = "Sticky aim",
+            title = "Target",
             toggle = "tb_sticky",
             rows = {
                 { kind = "key", id = "tb_selkey", label = "Select key" },
