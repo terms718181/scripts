@@ -214,7 +214,11 @@ end
 -- ---------------------------------------------------------------
 local WL = { list = {}, vis = {}, save = nil, addPrev = false, syncAt = 0 }
 
+-- an empty list is the normal case, so it is checked before anything else:
+-- keying an entry asks the character for its Address, which is a pcall'd
+-- property read per target per frame, and that sat in front of every shot
 function WL.has(t)
+    if next(WL.list) == nil then return false end
     return t ~= nil and t.character ~= nil and WL.list[selKey(t)] ~= nil
 end
 
@@ -222,6 +226,7 @@ end
 -- whitelist is switched off
 function WL.on(t)
     if not cfg("tb_wl_on") then return true end
+    if next(WL.list) == nil then return true end
     return not WL.has(t)
 end
 
@@ -719,13 +724,16 @@ end
 local function findClosest(cx, cy, localPos, ignoreSel, noCap, allowWl)
     local best, bestDist = nil, 9e9
     local maxd = noCap and 0 or wepCap()
+    -- decided once for the whole scan: per target this used to reach for the
+    -- character's Address even when there was nothing on the list to match
+    local wlCheck = cfg("tb_wl_on") and not allowWl and next(WL.list) ~= nil
     for _, t in ipairs(collectTargets()) do
         local hrp = t.hrp
         if hrp then
             local okPos, pos = pcall(function() return hrp.Position end)
             if okPos and pos and (pos.X ~= 0 or pos.Y ~= 0 or pos.Z ~= 0) and pos ~= localPos
                 and (maxd <= 0 or dist3(localPos, pos) <= maxd)
-                and (allowWl or WL.on(t))
+                and (not wlCheck or not WL.has(t))
                 and (ignoreSel or selOk(t)) then
                 local sp, onScreen = WorldToScreen(pos)
                 if onScreen then
@@ -742,7 +750,7 @@ end
 
 local function validTarget(t)
     if not t or not t.character or not t.character.Parent then return false end
-    if not WL.on(t) then return false end
+    if cfg("tb_wl_on") and next(WL.list) ~= nil and WL.has(t) then return false end
     if not rootOf(t) then return false end
     if cfg("tb_knock") and isKnocked(t.character) then return false end
     local okFf, ff = pcall(function()
@@ -831,13 +839,20 @@ local PAUSED = false
 local pauseAuto = false
 local autoPrev = {}
 local pauseTxt = nil
+local pauseDrawn = false
 local pauseStyleSize, pauseStyleFace = nil, nil
+local pausePollAt = 0
 
 local function pauseTick()
     local now = tick()
     if not cfg("tb_autopause") then
         pauseAuto = false
-    elseif windowActive() then
+    -- typing a message is not a frame accurate event: polling the chat keys on
+    -- every heartbeat put four key reads and a mouse read in front of the shot.
+    -- while paused it still asks every frame, so leaving chat stays instant
+    elseif PAUSED or now - pausePollAt >= 0.03 then
+        pausePollAt = now
+        if windowActive() then
         -- "/" opens the chat box from the keyboard
         local slash = vkHeld(0xBF)
         if slash and not autoPrev.slash then pauseAuto = true end
@@ -860,6 +875,7 @@ local function pauseTick()
             pauseAuto = false
         end
         autoPrev.enter, autoPrev.esc = enter, esc
+        end
     end
 
     PAUSED = pauseAuto
@@ -913,6 +929,16 @@ local function drawPause()
         if not pauseTxt then return end
         _G.StellarPauseText = { pauseTxt }
     end
+    -- the style is only read when there is a label to draw: asking the menu
+    -- library for its font size and the camera for its viewport sat in front
+    -- of the shot on every frame, for a word that was not on screen
+    if not PAUSED or cfg("tb_rmtext") then
+        if pauseDrawn then
+            pauseDrawn = false
+            pauseTxt.Visible = false
+        end
+        return
+    end
     local size, face = pauseStyle()
     if size ~= pauseStyleSize then
         pauseStyleSize = size
@@ -922,10 +948,7 @@ local function drawPause()
         pauseStyleFace = face
         pcall(function() pauseTxt.Font = face end)
     end
-    if not PAUSED or cfg("tb_rmtext") then
-        pauseTxt.Visible = false
-        return
-    end
+    pauseDrawn = true
     local ok, vp = pcall(function() return Workspace.CurrentCamera.ViewportSize end)
     local w = ok and vp and vp.X or 1280
     local h = ok and vp and vp.Y or 720
@@ -966,7 +989,10 @@ local function step()
     -- whitelist keys work with the trigger switched off too: sparing somebody
     -- should not require arming the trigger first. same pick rule as the
     -- target keys, just inverted
-    if windowActive() then
+    -- one focus read for the frame: the whitelist keys and the trigger gate
+    -- both used to ask the OS for it separately
+    local active = windowActive()
+    if active then
         local wlKey = tonumber(CFG.tb_wlkey) or 0
         if wlKey ~= 0 then
             local wx, wy = cursorPos()
@@ -982,7 +1008,7 @@ local function step()
         end
     end
 
-    if not cfg("tb_enabled") or not windowActive() then
+    if not cfg("tb_enabled") or not active then
         resetLock()
         hideCube()
         return
@@ -993,20 +1019,15 @@ local function step()
     pruneSel()
 
     local localPos = localRootPos()
+    local closest0 = findClosest(cx, cy, localPos, true)
     local selH = CFG.tb_selkey ~= 0 and vkHeld(CFG.tb_selkey)
     local unselH = CFG.tb_unselkey ~= 0 and vkHeld(CFG.tb_unselkey)
-    -- the select key always works, the way it always has: picks can be built
-    -- up before the feature is switched on. one key, two jobs: the body under
-    -- the cursor is picked, or dropped again if it is already picked
-    if selH and not prevSelKey then
-        local closest0 = findClosest(cx, cy, localPos, true)
-        if closest0 then
-            if SELECTED[selKey(closest0)] then
-                remSel(closest0)
-            elseif not WL.has(closest0) then
-                -- whitelist wins: a spared player is never also a sticky pick
-                addSel(closest0)
-            end
+    if selH and not prevSelKey and closest0 then
+        if SELECTED[selKey(closest0)] then
+            remSel(closest0)
+        elseif not WL.has(closest0) then
+            -- whitelist wins: a spared player is never also a sticky pick
+            addSel(closest0)
         end
     end
     -- the unselect key drops the picked body nearest the cursor
@@ -1729,21 +1750,6 @@ local function espShieldFrac(s, ch)
     return armor / math.max(s.armorMax, 1)
 end
 
--- body box in screen space, measured from the top of the head to the feet so
--- the outline is the size of the person instead of a fixed guess that drifts
--- with distance and camera pitch
-local function espBodyBox(ch, rootPos)
-    local head = espPart(ch, "Head")
-    if not head then return nil end
-    local top, okTop = WorldToScreen(head + Vector3.new(0, 0.55, 0))
-    local feet, okFeet = WorldToScreen(rootPos - Vector3.new(0, 3.0, 0))
-    if not (okTop and okFeet) then return nil end
-    local bh = feet.Y - top.Y
-    if bh < 8 then return nil end
-    local bw = bh * 0.45
-    return top.X - bw * 0.5, top.Y, bw, bh
-end
-
 local function updateESP()
     -- selected targets only, the same players the old target visuals drew for:
     -- nothing is painted for somebody you have not picked, and every feature
@@ -1788,18 +1794,13 @@ local function updateESP()
             seen[key] = true
             s.seenAt, s.shown = now, true
 
-            local bx, by, bw, bh = espBodyBox(ch, pos)
-            if not bx then
-                local d = dist3(cam.Position, pos)
-                local pxs = (lens.vp.Y * 0.5) / math.tan(math.rad(lens.fov) * 0.5) / math.max(d, 0.05)
-                bh, bw = 5 * pxs, 3 * pxs
-                bx, by = sp.X - bw / 2, sp.Y - bh / 2
-            end
+            local d = dist3(cam.Position, pos)
+            local pxs = (lens.vp.Y * 0.5) / math.tan(math.rad(lens.fov) * 0.5) / math.max(d, 0.05)
+            local bh, bw = 5 * pxs, 3 * pxs
+            local bx, by = sp.X - bw / 2, sp.Y - bh / 2
 
             s.box.Color = ESP_RED
-            -- same crisp one pixel outline the whitelist box uses; the hue is
-            -- what keeps a picked target apart from a spared one
-            s.box.Thickness = 1
+            s.box.Thickness = 2
             s.box.Position = Vector2.new(bx, by)
             s.box.Size = Vector2.new(bw, bh)
             s.box.Visible = wantBox
@@ -1906,13 +1907,15 @@ function WL.draw()
                 v = { box = b, txt = tx, shown = false, name = nil }
                 WL.vis[key] = v
             end
-            local bx, by, bw, bh = espBodyBox(ch, pos)
-            if not bx then
-                -- no head bone to measure from: keep a readable box at the root
-                bh = 34
-                bw = bh * 0.45
-                bx, by = sp.X - bw * 0.5, sp.Y - bh * 0.7
+            -- the same box your target visuals draw, only teal
+            local lens = lensInfo()
+            local bh, bw = 34, 34 * 0.45
+            if lens then
+                local d = dist3(cam.Position, pos)
+                local pxs = (lens.vp.Y * 0.5) / math.tan(math.rad(lens.fov) * 0.5) / math.max(d, 0.05)
+                bh, bw = 5 * pxs, 3 * pxs
             end
+            local bx, by = sp.X - bw / 2, sp.Y - bh / 2
             v.box.Position = Vector2.new(bx, by)
             v.box.Size = Vector2.new(bw, bh)
             v.box.Visible = wantBox
@@ -3692,8 +3695,30 @@ end
 -- gets a register budget of its own.
 local function buildGamesense()
     local GS_URL = "https://raw.githubusercontent.com/Interception-m/Matcha-UI-Shit/refs/heads/main/gamesense_lib.lua"
-    local okSrc, src = pcall(function() return game:HttpGet(GS_URL) end)
-    if okSrc and type(src) == "string" then
+    -- the library was fetched over the network on every execution, and that
+    -- fetch happens before anything else: a slow or blocked connection held the
+    -- whole script up for seconds while the same code without this menu came up
+    -- instantly. the first download is kept in the executor's workspace and read
+    -- from disk after that. delete ztb_gamesense_lib.lua to pick up upstream
+    -- changes to the library.
+    local GS_CACHE = "ztb_gamesense_lib.lua"
+    local src
+    pcall(function()
+        if type(isfile) == "function" and type(readfile) == "function" and isfile(GS_CACHE) then
+            local cached = readfile(GS_CACHE)
+            if type(cached) == "string" and #cached > 1000 then src = cached end
+        end
+    end)
+    if not src then
+        local okFetch, fetched = pcall(function() return game:HttpGet(GS_URL) end)
+        if okFetch and type(fetched) == "string" and #fetched > 1000 then
+            src = fetched
+            pcall(function()
+                if type(writefile) == "function" then writefile(GS_CACHE, fetched) end
+            end)
+        end
+    end
+    if type(src) == "string" then
         -- the window paints a generated rainbow strip along its top edge. Point
         -- the generator at a key that does not exist and swap its purple
         -- fallback for the base of our blue, so nothing rainbow can flash
@@ -3842,7 +3867,7 @@ local function buildGamesense()
         -- z-index and moved with the window as it is dragged or resized
         local TOP_A, TOP_B = Color3.fromRGB(28, 74, 166), Color3.fromRGB(96, 156, 255)
         local TOP_SEG = 96
-        local topLine, lastX, lastY, lastW = {}, nil, nil, nil
+        local topLine, lastX, lastY, lastW, topShown = {}, nil, nil, nil, false
         for i = 1, TOP_SEG do
             local f = (i - 1) / (TOP_SEG - 1)
             local sq = Drawing.new("Square")
@@ -3866,6 +3891,7 @@ local function buildGamesense()
                     lastX = nil
                     for i = 1, TOP_SEG do topLine[i].Visible = false end
                 end
+                topShown = false
                 return
             end
             local bw0 = win.w - 14
@@ -3879,7 +3905,12 @@ local function buildGamesense()
                     sq.Size = Vector2.new(math.max(1, math.ceil(bw) + 2), 2)
                 end
             end
-            for i = 1, TOP_SEG do topLine[i].Visible = true end
+            -- 96 draws are switched on when the strip comes back, not written
+            -- every frame: Visible does not change while it is up
+            if not topShown then
+                topShown = true
+                for i = 1, TOP_SEG do topLine[i].Visible = true end
+            end
         end)
 
         -- the library ships its own icon set and draws one in place of the tab
