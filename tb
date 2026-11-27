@@ -16,8 +16,23 @@ local CFG = {
 
     tb_sticky = false,
     tb_selkey = 0,
-    tb_unselkey = 0,
     tb_selvis = true,
+
+    -- auto pause: freeze the trigger, the target and whitelist keys and the
+    -- gun macro while the chat box is open, so a message being typed cannot
+    -- pick or drop anybody
+    tb_autopause = true,
+    -- hides the PAUSED label instead of showing it: off means the word stays
+    tb_rmtext = false,
+
+    -- whitelist: the mirror of the sticky picks. anyone on it is skipped by
+    -- the trigger, the gun macro and the target visuals
+    tb_wl_on = true,
+    tb_wlkey = 0,
+    tb_wlvis = true,
+    tb_wlbox = true,
+    tb_wlname = true,
+    tb_wldist = 1000,
 
     esp_box = true,
     esp_name = true,
@@ -157,7 +172,7 @@ local function dist3(a, b)
 end
 
 local SELECTED, SELVIS = {}, {}
-local prevSelKey, prevUnselKey = false, false
+local prevSelKey = false
 -- assigned once the config folder helpers exist further down: every pick is
 -- written out, so a reload of the script brings the targets back
 local saveTargets, clearSel
@@ -187,6 +202,92 @@ end
 
 local function selOk(t)
     return not cfg("tb_sticky") or SELECTED[selKey(t)] ~= nil
+end
+
+-- ---------------------------------------------------------------
+-- whitelist: the mirror of the sticky picks, inverted. everyone on this
+-- list is skipped by the trigger, the gun macro and the target visuals, and
+-- is marked on screen instead so you can see who you are sparing
+-- ---------------------------------------------------------------
+local WL = { list = {}, vis = {}, save = nil, addPrev = false, syncAt = 0 }
+
+function WL.has(t)
+    return t ~= nil and t.character ~= nil and WL.list[selKey(t)] ~= nil
+end
+
+-- true when this target may be acted on: not on the list, or the whole
+-- whitelist is switched off
+function WL.on(t)
+    if not cfg("tb_wl_on") then return true end
+    return not WL.has(t)
+end
+
+function WL.add(t)
+    if not (t and t.character) then return end
+    local k = selKey(t)
+    if WL.list[k] then return end
+    WL.list[k] = t
+    -- a whitelisted player must not also be a sticky pick, or the two
+    -- visual sets fight over the same body
+    if SELECTED[k] then remSel(t) end
+    if WL.save then WL.save() end
+end
+
+function WL.rem(t)
+    local k = t and t.character and selKey(t)
+    if not k then return end
+    local v = WL.vis[k]
+    WL.list[k], WL.vis[k] = nil, nil
+    if v then
+        pcall(function() v.box:Remove() end)
+        pcall(function() v.txt:Remove() end)
+    end
+    if WL.save then WL.save() end
+end
+
+-- characters are rewrapped on respawn and the key is their address, so an
+-- entry has to follow its player into the new body; a player who left is
+-- dropped from the list
+function WL.sync()
+    local now = tick()
+    if now - WL.syncAt < 0.5 then return end
+    WL.syncAt = now
+    local moves = {}
+    for k, t in pairs(WL.list) do
+        local ch = t.character
+        local live = false
+        if ch then
+            local okL, p = pcall(function() return ch.Parent ~= nil end)
+            live = okL and p == true
+        end
+        if not live then
+            if not t.player then
+                moves[#moves + 1] = { k = k, drop = true, t = t }
+            else
+                local okGone, gone = pcall(function() return t.player.Parent == nil end)
+                if okGone and gone then
+                    moves[#moves + 1] = { k = k, drop = true, t = t }
+                else
+                    local okC, nc = pcall(function() return t.player.Character end)
+                    if okC and nc then
+                        t.character = nc
+                        t.hrp = nil
+                        moves[#moves + 1] = { k = k, to = selKey(t), t = t }
+                    end
+                end
+            end
+        end
+    end
+    for _, m in ipairs(moves) do
+        if m.drop then
+            WL.rem(m.t)
+        else
+            local v = WL.vis[m.k]
+            WL.list[m.k], WL.vis[m.k] = nil, nil
+            WL.list[m.to] = m.t
+            if v then WL.vis[m.to] = v end
+        end
+    end
 end
 
 -- reuse the stored target's rootName when resolving a selection's root
@@ -612,7 +713,7 @@ local function closestSelected(cx, cy)
     return best
 end
 
-local function findClosest(cx, cy, localPos, ignoreSel, noCap)
+local function findClosest(cx, cy, localPos, ignoreSel, noCap, allowWl)
     local best, bestDist = nil, 9e9
     local maxd = noCap and 0 or wepCap()
     for _, t in ipairs(collectTargets()) do
@@ -621,6 +722,7 @@ local function findClosest(cx, cy, localPos, ignoreSel, noCap)
             local okPos, pos = pcall(function() return hrp.Position end)
             if okPos and pos and (pos.X ~= 0 or pos.Y ~= 0 or pos.Z ~= 0) and pos ~= localPos
                 and (maxd <= 0 or dist3(localPos, pos) <= maxd)
+                and (allowWl or WL.on(t))
                 and (ignoreSel or selOk(t)) then
                 local sp, onScreen = WorldToScreen(pos)
                 if onScreen then
@@ -637,6 +739,7 @@ end
 
 local function validTarget(t)
     if not t or not t.character or not t.character.Parent then return false end
+    if not WL.on(t) then return false end
     if not rootOf(t) then return false end
     if cfg("tb_knock") and isKnocked(t.character) then return false end
     local okFf, ff = pcall(function()
@@ -712,15 +815,168 @@ local function fireGun(now)
     pcall(mouse1click)
 end
 
+-- ---------------------------------------------------------------------
+-- auto pause: keys are read straight from the OS, so a letter typed into the
+-- Roblox chat box still reads as pressed and would pick or drop a target mid
+-- message. chat focus cannot be read on this executor (GuiService
+-- .SelectedObject, UIS:GetFocusedTextBox and the chat TextBox all read nil),
+-- so the pause follows the ways the box gets opened: "/" from the keyboard,
+-- and a click on the strip along the top left where the chat bar sits.
+-- enter, escape or a click anywhere else ends it again
+-- ---------------------------------------------------------------------
+local PAUSED = false
+local pauseAuto = false
+local autoPrev = {}
+local pauseTxt = nil
+local pauseStyleSize, pauseStyleFace = nil, nil
+
+local function pauseTick()
+    local now = tick()
+    if not cfg("tb_autopause") then
+        pauseAuto = false
+    elseif windowActive() then
+        -- "/" opens the chat box from the keyboard
+        local slash = vkHeld(0xBF)
+        if slash and not autoPrev.slash then pauseAuto = true end
+        autoPrev.slash = slash
+
+        -- clicking the chat bar is the other way in. a click anywhere else
+        -- means chat is not what was clicked, so that ends the pause. the
+        -- trigger's own shots are ignored, or aiming at the top of the screen
+        -- would freeze the script mid fight
+        local mx, my = cursorPos()
+        local lmb = vkHeld(0x01)
+        if lmb and not autoPrev.lmb and (now - lastFireAt) > 0.2 then
+            pauseAuto = mx <= 380 and my <= 42
+        end
+        autoPrev.lmb = lmb
+
+        -- enter sends, escape closes: either way the chat box is gone
+        local enter, esc = vkHeld(0x0D), vkHeld(0x1B)
+        if (enter and not autoPrev.enter) or (esc and not autoPrev.esc) then
+            pauseAuto = false
+        end
+        autoPrev.enter, autoPrev.esc = enter, esc
+    end
+
+    PAUSED = pauseAuto
+    return PAUSED
+end
+
+-- a re exec never calls back into the old script, so the label it drew stays
+-- on screen. a new run would then draw a second word on top of it - whatever
+-- font and size the old run picked - which is what read as glitched text.
+-- the objects are kept in _G and removed again at the start of the next run
+local function pauseReclaim()
+    local old = _G.StellarPauseText
+    if type(old) == "table" then
+        for _, d in ipairs(old) do pcall(function() d:Remove() end) end
+    end
+    _G.StellarPauseText = nil
+end
+
+-- the menu's own face and size, asked again every frame: a re exec reloads the
+-- library and resets its scale, so a size baked in at creation was the other
+-- half of the label changing weight between runs
+local function pauseStyle()
+    local size = 13
+    local face = Drawing.Fonts and Drawing.Fonts.UI
+    pcall(function()
+        local n = _G.Library and _G.Library.UI and tonumber(_G.Library.UI.FontSize)
+        if n and n > 6 then size = n end
+    end)
+    return size, face
+end
+
+-- drawn the way the menu draws its own labels: the ui face at the menu's font
+-- size, one pass with an outline. the library's faux bold (the word a second
+-- time, one pixel over) made this read as two words slightly apart, so it is
+-- left out here on purpose
+local function pauseBuild()
+    local ok, t = pcall(function() return Drawing.new("Text") end)
+    if not ok or not t then return nil end
+    t.Center, t.Visible, t.Outline = true, false, true
+    t.Color = Color3.fromRGB(255, 255, 255)
+    pcall(function() t.OutlineColor = Color3.fromRGB(0, 0, 0) end)
+    return t
+end
+
+pauseReclaim()
+
+local function drawPause()
+    if not pauseTxt then
+        pauseReclaim()
+        pauseTxt = pauseBuild()
+        if not pauseTxt then return end
+        _G.StellarPauseText = { pauseTxt }
+    end
+    local size, face = pauseStyle()
+    if size ~= pauseStyleSize then
+        pauseStyleSize = size
+        pauseTxt.Size = size
+    end
+    if face ~= nil and face ~= pauseStyleFace then
+        pauseStyleFace = face
+        pcall(function() pauseTxt.Font = face end)
+    end
+    if not PAUSED or cfg("tb_rmtext") then
+        pauseTxt.Visible = false
+        return
+    end
+    local ok, vp = pcall(function() return Workspace.CurrentCamera.ViewportSize end)
+    local w = ok and vp and vp.X or 1280
+    local h = ok and vp and vp.Y or 720
+    local cx, cy = w / 2, h * 0.12
+    pauseTxt.Text = "PAUSED"
+    pauseTxt.Position = Vector2.new(cx, cy)
+    pauseTxt.Visible = true
+end
+
 local lastErr = nil
 
 local function step()
     local now = tick()
     tbEngaged = false
 
+    -- chat safety first, so the pause holds whatever else is switched off
+    pauseTick()
+    drawPause()
+    if PAUSED then
+        -- let go of the trigger, and mark the pick keys as already down so the
+        -- first frame out of the pause cannot read a held key as a fresh press
+        if pendingRelease > 0 then
+            pcall(mouse1release)
+            pendingRelease = 0
+        end
+        resetLock()
+        hideCube()
+        prevSelKey = true
+        WL.addPrev = true
+        return
+    end
+
     if pendingRelease > 0 and now >= pendingRelease then
         pcall(mouse1release)
         pendingRelease = 0
+    end
+
+    -- whitelist keys work with the trigger switched off too: sparing somebody
+    -- should not require arming the trigger first. same pick rule as the
+    -- target keys, just inverted
+    if windowActive() then
+        local wlKey = tonumber(CFG.tb_wlkey) or 0
+        if wlKey ~= 0 then
+            local wx, wy = cursorPos()
+            local held = vkHeld(wlKey)
+            -- one key, two jobs: add the body under the cursor, or drop it again
+            if held and not WL.addPrev then
+                local t = findClosest(wx, wy, localRootPos(), true, true, true)
+                if t then
+                    if WL.has(t) then WL.rem(t) else WL.add(t) end
+                end
+            end
+            WL.addPrev = held
+        end
     end
 
     if not cfg("tb_enabled") or not windowActive() then
@@ -734,17 +990,23 @@ local function step()
     pruneSel()
 
     local localPos = localRootPos()
-    local closest0 = findClosest(cx, cy, localPos, true)
     local selH = CFG.tb_selkey ~= 0 and vkHeld(CFG.tb_selkey)
-    local unselH = CFG.tb_unselkey ~= 0 and vkHeld(CFG.tb_unselkey)
-    if selH and not prevSelKey and closest0 then
-        if SELECTED[selKey(closest0)] then remSel(closest0) else addSel(closest0) end
+    -- the pick key belongs to the target feature: with it switched off the key
+    -- must do nothing at all, instead of quietly adding and dropping picks
+    if cfg("tb_sticky") and selH and not prevSelKey then
+        local closest0 = findClosest(cx, cy, localPos, true)
+        -- one key, two jobs: the body under the cursor is picked, or dropped
+        -- if it is already picked
+        if closest0 then
+            if SELECTED[selKey(closest0)] then
+                remSel(closest0)
+            elseif not WL.has(closest0) then
+                -- whitelist wins: a spared player is never also a sticky pick
+                addSel(closest0)
+            end
+        end
     end
-    if unselH and not prevUnselKey then
-        local st = closestSelected(cx, cy)
-        if st then remSel(st) end
-    end
-    prevSelKey, prevUnselKey = selH, unselH
+    prevSelKey = selH
 
     if knifeOut() then
         return
@@ -1007,6 +1269,10 @@ local function gmAimedTarget()
     local skipKo = cfg("tb_knock")
     for _, t in ipairs(collectTargets()) do
         if t.character ~= char and gmOnBox(t, cx, cy)
+            and WL.on(t)
+            -- with the target feature on, the only player the macro counts is
+            -- one that was picked: aiming at a random player is not a target
+            and selOk(t)
             and not (skipKo and isKnocked(t.character)) then
             gmAimT = t
             return t
@@ -1015,8 +1281,17 @@ local function gmAimedTarget()
     return nil
 end
 
+-- the macro follows the target feature: with it on, the guns only swap at a
+-- player that was actually picked, never at whoever sits under the cursor.
+-- selOk() above makes that a no-op while the feature is off
+local function gmStickyOk()
+    if not cfg("tb_sticky") then return true end
+    return gmAimedTarget() ~= nil
+end
+
 local function gmActive()
-    if not cfg("gm_on") then return false end
+    -- paused for chat: the macro must not swap guns either
+    if PAUSED or not cfg("gm_on") then return false end
     if cfg("gm_link") then
         -- linked: only while the trigger has a target under the crosshair.
         if tbEngaged then return true end
@@ -1042,15 +1317,15 @@ local function gmActive()
         return false
     end
     local mode = cfg("gm_mode")
-    if mode == "always" then return true end
+    if mode == "always" then return gmStickyOk() end
     local key = cfg("gm_key")
     local pressed = key ~= nil and vkHeld(key)
     if mode == "toggle" then
         if pressed and not gmPrev then gmOn = not gmOn end
         gmPrev = pressed
-        return gmOn
+        return gmOn and gmStickyOk()
     end
-    return pressed
+    return pressed and gmStickyOk()
 end
 
 -- which guns are ticked, resolved once per pass. the old version asked cfg()
@@ -1287,7 +1562,7 @@ local function gmNearestDist()
     local skipKo = cfg("tb_knock")
     local best = nil
     for _, t in ipairs(collectTargets()) do
-        if t.character ~= char then
+        if t.character ~= char and WL.on(t) then
             local pos = gmRootPos(t.character)
             if pos and (pos.X ~= 0 or pos.Y ~= 0 or pos.Z ~= 0)
                 and not (skipKo and isKnocked(t.character)) then
@@ -1457,6 +1732,21 @@ local function espShieldFrac(s, ch)
     return armor / math.max(s.armorMax, 1)
 end
 
+-- body box in screen space, measured from the top of the head to the feet so
+-- the outline is the size of the person instead of a fixed guess that drifts
+-- with distance and camera pitch
+local function espBodyBox(ch, rootPos)
+    local head = espPart(ch, "Head")
+    if not head then return nil end
+    local top, okTop = WorldToScreen(head + Vector3.new(0, 0.55, 0))
+    local feet, okFeet = WorldToScreen(rootPos - Vector3.new(0, 3.0, 0))
+    if not (okTop and okFeet) then return nil end
+    local bh = feet.Y - top.Y
+    if bh < 8 then return nil end
+    local bw = bh * 0.45
+    return top.X - bw * 0.5, top.Y, bw, bh
+end
+
 local function updateESP()
     -- selected targets only, the same players the old target visuals drew for:
     -- nothing is painted for somebody you have not picked, and every feature
@@ -1501,13 +1791,18 @@ local function updateESP()
             seen[key] = true
             s.seenAt, s.shown = now, true
 
-            local d = dist3(cam.Position, pos)
-            local pxs = (lens.vp.Y * 0.5) / math.tan(math.rad(lens.fov) * 0.5) / math.max(d, 0.05)
-            local bh, bw = 5 * pxs, 3 * pxs
-            local bx, by = sp.X - bw / 2, sp.Y - bh / 2
+            local bx, by, bw, bh = espBodyBox(ch, pos)
+            if not bx then
+                local d = dist3(cam.Position, pos)
+                local pxs = (lens.vp.Y * 0.5) / math.tan(math.rad(lens.fov) * 0.5) / math.max(d, 0.05)
+                bh, bw = 5 * pxs, 3 * pxs
+                bx, by = sp.X - bw / 2, sp.Y - bh / 2
+            end
 
             s.box.Color = ESP_RED
-            s.box.Thickness = 2
+            -- same crisp one pixel outline the whitelist box uses; the hue is
+            -- what keeps a picked target apart from a spared one
+            s.box.Thickness = 1
             s.box.Position = Vector2.new(bx, by)
             s.box.Size = Vector2.new(bw, bh)
             s.box.Visible = wantBox
@@ -1580,6 +1875,70 @@ local function updateESP()
     end
 end
 
+-- whitelist markers: a thin teal box and the name over everyone on the
+-- list. kept out of the target visuals so either one can be on alone
+function WL.draw()
+    WL.sync()
+    local cam = Workspace.CurrentCamera
+    local on = cfg("tb_wl_on") == true and cfg("tb_wlvis") == true and cam ~= nil
+    local maxDist = tonumber(cfg("tb_wldist")) or 1000
+    local wantBox = on and cfg("tb_wlbox") == true
+    local wantName = on and cfg("tb_wlname") == true
+    local seen = {}
+    for key, t in pairs(WL.list) do
+        local ch = t.character
+        local pos = ch and gmRootPos(ch)
+        local sp, vis = nil, false
+        if on and pos and (maxDist <= 0 or dist3(cam.Position, pos) <= maxDist) then
+            sp, vis = WorldToScreen(pos)
+        end
+        local v = WL.vis[key]
+        if vis and sp then
+            if not v then
+                local b = Drawing.new("Square")
+                b.Filled = false
+                b.Thickness = 1
+                b.Color = Color3.fromRGB(60, 158, 170)
+                b.Visible = false
+                local tx = Drawing.new("Text")
+                tx.Size = 13
+                tx.Center = true
+                tx.Outline = true
+                tx.Color = Color3.fromRGB(60, 158, 170)
+                tx.Visible = false
+                v = { box = b, txt = tx, shown = false, name = nil }
+                WL.vis[key] = v
+            end
+            local bx, by, bw, bh = espBodyBox(ch, pos)
+            if not bx then
+                -- no head bone to measure from: keep a readable box at the root
+                bh = 34
+                bw = bh * 0.45
+                bx, by = sp.X - bw * 0.5, sp.Y - bh * 0.7
+            end
+            v.box.Position = Vector2.new(bx, by)
+            v.box.Size = Vector2.new(bw, bh)
+            v.box.Visible = wantBox
+            local nm = tostring(t.player and t.player.Name or (ch and ch.Name) or "?")
+            if v.name ~= nm then
+                v.txt.Text = nm
+                v.name = nm
+            end
+            v.txt.Position = Vector2.new(sp.X, by - 16)
+            v.txt.Visible = wantName
+            v.shown = true
+            seen[key] = true
+        elseif v and v.shown then
+            v.box.Visible, v.txt.Visible, v.shown = false, false, false
+        end
+    end
+    for key, v in pairs(WL.vis) do
+        if not seen[key] and v.shown then
+            v.box.Visible, v.txt.Visible, v.shown = false, false, false
+        end
+    end
+end
+
 local espErr = nil
 local function espSafe()
     local ok, err = pcall(updateESP)
@@ -1587,6 +1946,7 @@ local function espSafe()
         espErr = err
         warn("target visuals error: " .. tostring(err))
     end
+    pcall(WL.draw)
 end
 
 local espHooked = false
@@ -1780,7 +2140,9 @@ local function saveConfig(name)
     local lines = {}
     for k, val in pairs(CFG) do
         -- menu-only state (file slots, display names) stays out of the file
-        if not k:match("^cfg") and not k:match("Name$") then
+        -- tb_autoload is a preference, not a setting: it lives in its own file
+        -- so the config it loads cannot carry the very flag that would stop it
+        if k ~= "tb_autoload" and not k:match("^cfg") and not k:match("Name$") then
             lines[#lines + 1] = k .. "=" .. tostring(val)
         end
     end
@@ -1795,7 +2157,7 @@ local function loadConfig(name)
     local keyLoaded = false
     for line in raw:gmatch("[^\r\n]+") do
         local k, val = line:match("^([%w_]+)=(.*)$")
-        if k and CFG[k] ~= nil then
+        if k and CFG[k] ~= nil and k ~= "tb_autoload" then
             local n = tonumber(val)
             if n then
                 -- the bind has to stay usable: 0 would leave the menu unopenable
@@ -1909,7 +2271,7 @@ do
         end
         restoring = true
         for _, a in ipairs(addNow) do
-            addSel(a.t)
+            if not WL.has(a.t) then addSel(a.t) end
             pending[a.id] = nil
         end
         restoring = false
@@ -1918,14 +2280,89 @@ do
 
     restoreTargets()
 
+    -- whitelist file: same shape as targets.txt and resolved the same way, so
+    -- a reload brings the list back even before the players have spawned
+    local WL_FILE = CFG_DIR .. "/whitelist.txt"
+    local wlPending = nil
+    local wlTickAt = 0
+
+    WL.save = function()
+        if restoring then return end
+        local ids, seen = {}, {}
+        for _, t in pairs(WL.list) do
+            local id = selId(t)
+            if id and not seen[id] then
+                seen[id] = true
+                ids[#ids + 1] = id
+            end
+        end
+        table.sort(ids)
+        pcall(function()
+            makefolder(CFG_DIR)
+            writefile(WL_FILE, table.concat(ids, "\n"))
+        end)
+    end
+
+    WL.clear = function()
+        local list = {}
+        for _, t in pairs(WL.list) do list[#list + 1] = t end
+        for _, t in ipairs(list) do WL.rem(t) end
+        for k in pairs(WL.list) do WL.list[k] = nil end
+        for k in pairs(WL.vis) do WL.vis[k] = nil end
+        wlPending = nil
+        WL.save()
+    end
+
+    local function restoreWL()
+        local ok, raw = pcall(readfile, WL_FILE)
+        if not ok or type(raw) ~= "string" or #raw == 0 then return end
+        local ids = {}
+        for line in raw:gmatch("[^%r\n]+") do
+            line = line:gsub("^%s+", ""):gsub("%s+$", "")
+            if #line > 0 then ids[line] = true end
+        end
+        if next(ids) then wlPending = ids end
+    end
+
+    local function wlTick()
+        if not wlPending then return end
+        local now = tick()
+        if now - wlTickAt < 0.5 then return end
+        wlTickAt = now
+        local ok, list = pcall(collectTargets)
+        if not ok or type(list) ~= "table" then return end
+        local left = 0
+        for id in pairs(wlPending) do
+            local found = nil
+            for _, t in ipairs(list) do
+                if selId(t) == id then found = t break end
+            end
+            if found then
+                restoring = true
+                WL.add(found)
+                restoring = false
+                wlPending[id] = nil
+            else
+                left = left + 1
+            end
+        end
+        if left == 0 then wlPending = nil end
+    end
+
+    restoreWL()
+
     pcall(function()
         local rs = game:GetService("RunService")
         if rs and rs.Heartbeat then
-            rs.Heartbeat:Connect(function() pcall(targetsTick) end)
+            rs.Heartbeat:Connect(function()
+                pcall(targetsTick)
+                pcall(wlTick)
+            end)
         else
             spawn(function()
                 while true do
                     pcall(targetsTick)
+                    pcall(wlTick)
                     wait(0.5)
                 end
             end)
@@ -1951,7 +2388,45 @@ local function getAutoName()
     return n
 end
 
-if CFG.tb_autoload == nil then CFG.tb_autoload = true end
+-- the auto load choice gets its own file. it cannot live in a config: the
+-- config it would load already holds the flag, so turning it off only took
+-- effect after the load it was meant to stop, and every restart loaded anyway
+local AUTO_PREF = CFG_DIR .. "/autoload_pref.txt"
+
+local function readAutoloadPref()
+    local ok, raw = pcall(readfile, AUTO_PREF)
+    if not ok or type(raw) ~= "string" then return nil end
+    raw = raw:gsub("[^%w]", "")
+    if raw == "1" or raw == "true" then return true end
+    if raw == "0" or raw == "false" then return false end
+    return nil
+end
+
+local function writeAutoloadPref(on)
+    pcall(makefolder, CFG_DIR)
+    return pcall(writefile, AUTO_PREF, on and "1" or "0")
+end
+
+-- one time only: an older install kept the flag inside the config it loads, so
+-- take the first value from there instead of trading one surprise load for
+-- another
+local function prefFromConfig()
+    local name = getAutoName()
+    if not name then return nil end
+    local ok, raw = pcall(readfile, cfgPath(name))
+    if not ok or type(raw) ~= "string" then return nil end
+    local v = raw:match("[\r\n]tb_autoload=([^\r\n]+)") or raw:match("^tb_autoload=([^\r\n]+)")
+    if v == "false" then return false end
+    if v == "true" then return true end
+    return nil
+end
+
+if CFG.tb_autoload == nil then
+    local pref = readAutoloadPref()
+    if pref == nil then pref = prefFromConfig() end
+    CFG.tb_autoload = pref ~= false
+    if pref ~= nil then writeAutoloadPref(pref) end
+end
 
 local function autoloadOnStart()
     if CFG.tb_autoload == false then return end
@@ -1963,6 +2438,22 @@ local function autoloadOnStart()
 end
 
 autoloadOnStart()
+
+-- the toggle in either menu only writes CFG, so mirror it into the pref file as
+-- soon as it flips: one boolean compare a frame, a write only on a change
+local autoPrefSeen = CFG.tb_autoload ~= false
+pcall(function()
+    local rs = game:GetService("RunService")
+    if rs and rs.Heartbeat then
+        rs.Heartbeat:Connect(function()
+            local v = CFG.tb_autoload ~= false
+            if v ~= autoPrefSeen then
+                autoPrefSeen = v
+                writeAutoloadPref(v)
+            end
+        end)
+    end
+end)
 
 local function scanConfigs()
     local out = {}
@@ -3457,7 +3948,6 @@ local function buildGamesense()
             local s = Box(Target, "Target", 0, 12, 0, 24)
             TG(s, "tb_sticky", "Enabled")
             KEY(s, "tb_selkey", "Select key")
-            KEY(s, "tb_unselkey", "Unselect key")
             TG(s, "tb_selvis", "Target visuals")
             TG(s, "esp_box", "Box")
             TG(s, "esp_name", "Name")
@@ -3467,6 +3957,18 @@ local function buildGamesense()
             SL(s, "esp_dist", "Max dist", 0, 2000, 1)
             s:Button({ Name = "reset targets", Confirmation = true,
                 Callback = function() pcall(clearSel) end })
+        end
+
+        do
+            local w = Box(Target, "Whitelist", 12, 12, 0, 24)
+            TG(w, "tb_wl_on", "Enabled")
+            KEY(w, "tb_wlkey", "Whitelist key")
+            TG(w, "tb_wlvis", "Whitelist visuals")
+            TG(w, "tb_wlbox", "Box")
+            TG(w, "tb_wlname", "Name")
+            SL(w, "tb_wldist", "Max dist", 0, 2000, 1)
+            w:Button({ Name = "reset whitelist", Confirmation = true,
+                Callback = function() pcall(WL.clear) end })
         end
 
         do
@@ -3496,6 +3998,10 @@ local function buildGamesense()
                 Callback = function(v) if type(v) == "string" and #v > 0 then CFG.cfgName = v end end })
             TG(p, "tb_autoload", "Auto load config")
             KEY(p, "menuKey", "Menu key")
+
+            local cs = Box(Settings, "Chat safety", 0, 12, 12, 8)
+            TG(cs, "tb_autopause", "Auto pause")
+            TG(cs, "tb_rmtext", "Remove text")
 
             local list, refresh
             local function clean(s)
@@ -3615,7 +4121,7 @@ local okNew, m = pcall(MenuLib.new, {
         },
         [3] = { "sticky" },
         [5] = { "humanize", "hesitation" },
-        [6] = { "profile", "saved" },
+        [6] = { "profile", "chat", "saved" },
     },
     cards = {
         main = {
@@ -3739,7 +4245,6 @@ local okNew, m = pcall(MenuLib.new, {
             toggle = "tb_sticky",
             rows = {
                 { kind = "key", id = "tb_selkey", label = "Select key" },
-                { kind = "key", id = "tb_unselkey", label = "Unselect key" },
                 { kind = "toggle", id = "tb_selvis", label = "Target visuals" },
                 { kind = "toggle", id = "esp_box", label = "Box" },
                 { kind = "toggle", id = "esp_name", label = "Name" },
@@ -3757,6 +4262,13 @@ local okNew, m = pcall(MenuLib.new, {
                 { kind = "button", action = "cfgCreate", label = "save config" },
                 { kind = "toggle", id = "tb_autoload", label = "Auto load config" },
                 { kind = "key", id = "menuKey", label = "Menu key" },
+            },
+        },
+        chat = {
+            title = "Chat safety",
+            rows = {
+                { kind = "toggle", id = "tb_autopause", label = "Auto pause" },
+                { kind = "toggle", id = "tb_rmtext", label = "Remove text" },
             },
         },
         saved = {
