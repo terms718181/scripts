@@ -3214,10 +3214,16 @@ local function buildGamesense()
         -- registration, and renaming both would simply recreate the rainbow
         local stepA, nImg = src:gsub('"gen:rainbow", x %+ 7', '"gen:missing", x + 7')
         local stepB, nCol = stepA:gsub('rgb%(204,%s*70,%s*205%)', 'rgb(28, 74, 166)')
+        -- control names, section titles and slider values were all painted
+        -- below full white (200 and 187 alpha) on top of a 205 grey theme
+        -- colour, which made the menu read washed out. Put all three back to
+        -- white so the text matches the crisp look of the reference menu.
+        local stepC = stepB:gsub('C%.white, 200 / 255', 'C.white, 1')
+        local stepD = stepC:gsub('en and 187 / 255', 'en and 1')
         if nImg == 0 or nCol == 0 then
             warn("[tb] gamesense top line changed upstream, drawing the gradient only")
         end
-        src = stepB
+        src = stepD
     end
 
     local okLoad, Lib = pcall(function()
@@ -3231,11 +3237,16 @@ local function buildGamesense()
     end
 
     if Lib then
+        -- tab labels and headings are drawn with the library's bold face, and
+        -- that face is unset by default, so every "bold" label silently fell
+        -- back to the regular one. Setting it gives the labels real weight.
+        pcall(function() Lib:SetBoldFont("SystemBold") end)
+
         -- same palette as before: near black panels, teal accent
         pcall(function()
             Lib.Theme.Default.Accent = MenuLib.theme.accent
             Lib.Theme.Default.SecondAccent = Color3.fromRGB(38, 110, 122)
-            Lib.Theme.Default.TextColor = MenuLib.theme.text
+            Lib.Theme.Default.TextColor = Color3.fromRGB(255, 255, 255)
         end)
 
         local listeners, setters = {}, {}
@@ -3382,11 +3393,14 @@ local function buildGamesense()
             for i = 1, TOP_SEG do topLine[i].Visible = true end
         end)
 
-        local Combat = Win:CreateTab({ Name = "COMBAT" })
-        local Weapons = Win:CreateTab({ Name = "WEAPONS" })
-        local Target = Win:CreateTab({ Name = "TARGET" })
-        local Behavior = Win:CreateTab({ Name = "BEHAVIOR" })
-        local Settings = Win:CreateTab({ Name = "SETTINGS" })
+        -- the library ships its own icon set and draws one in place of the tab
+        -- name whenever Icon names one of them (rage, aa, legit, visuals, misc,
+        -- skins, players, config, grenade), so the rail reads as pictures only
+        local Combat = Win:CreateTab({ Name = "Combat", Icon = "rage" })
+        local Weapons = Win:CreateTab({ Name = "Weapons", Icon = "legit" })
+        local Target = Win:CreateTab({ Name = "Target", Icon = "aa" })
+        local Behavior = Win:CreateTab({ Name = "Behavior", Icon = "misc" })
+        local Settings = Win:CreateTab({ Name = "Settings", Icon = "config" })
         Win:SetTab(1)
 
         do
@@ -3821,7 +3835,7 @@ if menu then
         end
     end
 
-    local menuHooked = false
+    local menuHooked = falsea
     pcall(function()
         local rs = game:GetService("RunService")
         if rs and rs.RenderStepped then
