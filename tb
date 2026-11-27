@@ -16,6 +16,7 @@ local CFG = {
 
     tb_sticky = false,
     tb_selkey = 0,
+    tb_unselkey = 0,
     tb_selvis = true,
 
     -- auto pause: freeze the trigger, the target and whitelist keys and the
@@ -172,7 +173,7 @@ local function dist3(a, b)
 end
 
 local SELECTED, SELVIS = {}, {}
-local prevSelKey = false
+local prevSelKey, prevUnselKey = false, false
 -- assigned once the config folder helpers exist further down: every pick is
 -- written out, so a reload of the script brings the targets back
 local saveTargets, clearSel
@@ -200,6 +201,8 @@ local function remSel(t)
     if saveTargets then saveTargets() end
 end
 
+-- the target feature: with it on, only a picked body counts as a target.
+-- the pick list never reaches the gun macro, which runs off its own key
 local function selOk(t)
     return not cfg("tb_sticky") or SELECTED[selKey(t)] ~= nil
 end
@@ -950,7 +953,7 @@ local function step()
         end
         resetLock()
         hideCube()
-        prevSelKey = true
+        prevSelKey, prevUnselKey = true, true
         WL.addPrev = true
         return
     end
@@ -991,12 +994,12 @@ local function step()
 
     local localPos = localRootPos()
     local selH = CFG.tb_selkey ~= 0 and vkHeld(CFG.tb_selkey)
-    -- the pick key belongs to the target feature: with it switched off the key
-    -- must do nothing at all, instead of quietly adding and dropping picks
-    if cfg("tb_sticky") and selH and not prevSelKey then
+    local unselH = CFG.tb_unselkey ~= 0 and vkHeld(CFG.tb_unselkey)
+    -- the select key always works, the way it always has: picks can be built
+    -- up before the feature is switched on. one key, two jobs: the body under
+    -- the cursor is picked, or dropped again if it is already picked
+    if selH and not prevSelKey then
         local closest0 = findClosest(cx, cy, localPos, true)
-        -- one key, two jobs: the body under the cursor is picked, or dropped
-        -- if it is already picked
         if closest0 then
             if SELECTED[selKey(closest0)] then
                 remSel(closest0)
@@ -1006,7 +1009,12 @@ local function step()
             end
         end
     end
-    prevSelKey = selH
+    -- the unselect key drops the picked body nearest the cursor
+    if unselH and not prevUnselKey then
+        local st = closestSelected(cx, cy)
+        if st then remSel(st) end
+    end
+    prevSelKey, prevUnselKey = selH, unselH
 
     if knifeOut() then
         return
@@ -1270,23 +1278,12 @@ local function gmAimedTarget()
     for _, t in ipairs(collectTargets()) do
         if t.character ~= char and gmOnBox(t, cx, cy)
             and WL.on(t)
-            -- with the target feature on, the only player the macro counts is
-            -- one that was picked: aiming at a random player is not a target
-            and selOk(t)
             and not (skipKo and isKnocked(t.character)) then
             gmAimT = t
             return t
         end
     end
     return nil
-end
-
--- the macro follows the target feature: with it on, the guns only swap at a
--- player that was actually picked, never at whoever sits under the cursor.
--- selOk() above makes that a no-op while the feature is off
-local function gmStickyOk()
-    if not cfg("tb_sticky") then return true end
-    return gmAimedTarget() ~= nil
 end
 
 local function gmActive()
@@ -1317,15 +1314,15 @@ local function gmActive()
         return false
     end
     local mode = cfg("gm_mode")
-    if mode == "always" then return gmStickyOk() end
+    if mode == "always" then return true end
     local key = cfg("gm_key")
     local pressed = key ~= nil and vkHeld(key)
     if mode == "toggle" then
         if pressed and not gmPrev then gmOn = not gmOn end
         gmPrev = pressed
-        return gmOn and gmStickyOk()
+        return gmOn
     end
-    return pressed and gmStickyOk()
+    return pressed
 end
 
 -- which guns are ticked, resolved once per pass. the old version asked cfg()
@@ -3948,6 +3945,7 @@ local function buildGamesense()
             local s = Box(Target, "Target", 0, 12, 0, 24)
             TG(s, "tb_sticky", "Enabled")
             KEY(s, "tb_selkey", "Select key")
+            KEY(s, "tb_unselkey", "Unselect key")
             TG(s, "tb_selvis", "Target visuals")
             TG(s, "esp_box", "Box")
             TG(s, "esp_name", "Name")
@@ -4245,6 +4243,7 @@ local okNew, m = pcall(MenuLib.new, {
             toggle = "tb_sticky",
             rows = {
                 { kind = "key", id = "tb_selkey", label = "Select key" },
+                { kind = "key", id = "tb_unselkey", label = "Unselect key" },
                 { kind = "toggle", id = "tb_selvis", label = "Target visuals" },
                 { kind = "toggle", id = "esp_box", label = "Box" },
                 { kind = "toggle", id = "esp_name", label = "Name" },
