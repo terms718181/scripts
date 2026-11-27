@@ -2158,6 +2158,10 @@ function MenuLib.new(config)
     local PADX = 12
     local PADB = 14   -- breathing room under the last card
     local CARD_TITLE = 20  -- muted card name, printed above the card box
+    -- Corner radii in design pixels. The window curve is the bigger of the two,
+    -- the cards sit inside it a shade tighter, as in the reference.
+    local WINR = 7
+    local CARDR = 5
     local ROW_H = 25
 
     local M = {
@@ -2270,18 +2274,23 @@ function MenuLib.new(config)
         return tr
     end
 
-    local function rq(x, y, w, h, color, z)
+    -- Rounded rect in design space. Rounding is a real square property in this
+    -- VM - it reads back after a write, unlike Color - so panels can carry the
+    -- soft corners the reference has instead of the hard 90 degree ones we drew.
+    -- Filled is likewise a real property, so one call covers fill and outline.
+    local function rq(x, y, w, h, color, z, rad, outline)
         sqN = sqN + 1
         local s = SQ_ROUND[sqN]
         if not s then
             s = Drawing.new("Square")
             s.Color = T.text
-            s.Filled = true
-            s.Thickness = 1
             s.Visible = false
-            pcall(function() s.Rounding = 4 end)
             SQ_ROUND[sqN] = s
         end
+        s.Filled = outline ~= true
+        s.Thickness = 1
+        -- the corner radius is screen pixels, so it scales with everything else
+        s.Rounding = math.max(1, math.floor((rad or 6) * SC + 0.5))
         s.Position = Vector2.new(math.floor(dsx(x) + 0.5), math.floor(dsy(y) + 0.5))
         -- never scale an edge below one pixel: a 1px outline becomes 0.8px and
         -- stops drawing, which killed every horizontal side of a box
@@ -2290,6 +2299,12 @@ function MenuLib.new(config)
         s.ZIndex = z or 10
         s.Visible = true
         return s
+    end
+
+    -- The same rect as an outline: one unfilled rounded square, so the border
+    -- curves around the corner with the fill instead of boxing it in.
+    local function rstroke(x, y, w, h, color, z, rad)
+        return rq(x, y, w, h, color, z, rad, true)
     end
 
     local function pqRaw(x, y, w, h, color, z)
@@ -2451,8 +2466,8 @@ function MenuLib.new(config)
 
         local by0 = y + CARD_TITLE
         local bh = h - CARD_TITLE
-        pq(x, by0, w, bh, T.card, 10)
-        stroke(x, by0, w, bh, T.cardBorder, 11)
+        rq(x, by0, w, bh, T.card, 10, CARDR)
+        rstroke(x, by0, w, bh, T.cardBorder, 11, CARDR)
 
         -- Card switch sits on the title line, outside the box. It gets a well
         -- of its own: filling it with the window colour made the off state
@@ -2673,9 +2688,10 @@ function MenuLib.new(config)
 
         -- Flat near-black window, plain grey hairline all round, with the thin
         -- teal accent the reference runs along its very top edge.
-        pq(x, y, w, h, T.win, 8)
-        stroke(x, y, w, h, T.winBorder, 9)
-        pq(x, y, w, 2, T.accent, 12)
+        rq(x, y, w, h, T.win, 8, WINR)
+        rstroke(x, y, w, h, T.winBorder, 9, WINR)
+        -- inset by the corner radius so the accent cannot poke out of the curve
+        rq(x + WINR, y + 1, w - WINR * 2, 2, T.accent, 12, 1)
 
         -- Header: the reference gives this no bar of its own. The software name
         -- sits in the content column and the tabs sit in a bordered field under
@@ -2727,7 +2743,10 @@ function MenuLib.new(config)
             -- same size and face as the tab labels, so the column reads as one
             -- family with the header instead of looking heavier
             tx(x + 18, ly, sections[i].label or "", 12, active and T.text or T.mute, false, 11)
-            HITS[#HITS + 1] = { x = x, y = ly - 12, w = SW, h = 38, kind = "ptab", section = i }
+            -- the hitbox is the whole outlined cell, not just the label band:
+            -- the cell runs from y+20 to y+93, and only that middle strip used
+            -- to respond, so its top and bottom edges looked clickable and were not
+            HITS[#HITS + 1] = { x = x, y = ly - 38, w = SW, h = 74, kind = "ptab", section = i }
             ly = ly + 74
         end
 
@@ -2772,8 +2791,8 @@ function MenuLib.new(config)
             local dropH = #opts * orowH + 2
             local dy = dropdown.fy + dropdown.fh + 2
             if dy + dropH > y + h - 4 then dy = dropdown.fy - dropH - 2 end
-            pq(dropdown.fx, dy, bw, dropH, T.card, 13)
-            stroke(dropdown.fx, dy, bw, dropH, T.cardBorder, 14)
+            rq(dropdown.fx, dy, bw, dropH, T.card, 13, CARDR)
+            rstroke(dropdown.fx, dy, bw, dropH, T.cardBorder, 14, CARDR)
             for i = 1, #opts do
                 local oy = dy + 1 + (i - 1) * orowH
                 local sel = values[dropdown.id] == opts[i]
@@ -3174,8 +3193,380 @@ for i = 1, FILE_SLOTS do
     fileRows[i] = { kind = "file", id = "cfgFile" .. i, label = "" }
 end
 
-local menu
-if MenuLib then
+-- ---------------------------------------------------------------
+-- gamesense ui: the menu library the reference menu is built on. Every
+-- control writes straight into CFG and pings the same listeners the built in
+-- menu used, so the triggerbot never knows which menu is drawing. If the
+-- library cannot be fetched the script falls back to the menu above.
+-- ---------------------------------------------------------------
+-- Built inside a function on purpose: this chunk already uses most of Luau's
+-- 200 local registers, and the controls below overflowed it. A function body
+-- gets a register budget of its own.
+local function buildGamesense()
+    local GS_URL = "https://raw.githubusercontent.com/Interception-m/Matcha-UI-Shit/refs/heads/main/gamesense_lib.lua"
+    local okSrc, src = pcall(function() return game:HttpGet(GS_URL) end)
+    if okSrc and type(src) == "string" then
+        -- the window paints a generated rainbow strip along its top edge. Point
+        -- the generator at a key that does not exist and swap its purple
+        -- fallback for the base of our blue, so nothing rainbow can flash
+        -- through while the menu is dragged; the gradient goes on top of this
+        -- anchored on the call site: the key also appears once as the generator
+        -- registration, and renaming both would simply recreate the rainbow
+        local stepA, nImg = src:gsub('"gen:rainbow", x %+ 7', '"gen:missing", x + 7')
+        local stepB, nCol = stepA:gsub('rgb%(204,%s*70,%s*205%)', 'rgb(28, 74, 166)')
+        if nImg == 0 or nCol == 0 then
+            warn("[tb] gamesense top line changed upstream, drawing the gradient only")
+        end
+        src = stepB
+    end
+
+    local okLoad, Lib = pcall(function()
+        loadstring(src)()
+        return _G.Library
+    end)
+
+    if not okLoad or type(Lib) ~= "table" or type(Lib.Window) ~= "function" then
+        warn("[tb] gamesense menu unavailable, using the built in one: " .. tostring(Lib))
+        Lib = nil
+    end
+
+    if Lib then
+        -- same palette as before: near black panels, teal accent
+        pcall(function()
+            Lib.Theme.Default.Accent = MenuLib.theme.accent
+            Lib.Theme.Default.SecondAccent = Color3.fromRGB(38, 110, 122)
+            Lib.Theme.Default.TextColor = MenuLib.theme.text
+        end)
+
+        local listeners, setters = {}, {}
+        local function changed(id, v)
+            local fn = listeners[id]
+            if fn then pcall(fn, v, id) end
+            local any = listeners["*"]
+            if any then pcall(any, v, id) end
+        end
+        -- one write path: the engine reads CFG, listeners react to the change
+        local function bind(id, v)
+            CFG[id] = v
+            changed(id, v)
+        end
+
+        local function Box(tab, name, col, span, row, rowSpan)
+            return tab:Section({ Name = name, Grid = { col, span, row, rowSpan },
+                Movable = false, Resizable = false })
+        end
+
+        local function TG(sec, id, name)
+            local w
+            w = sec:Toggle({ Name = name, Flag = id, Default = CFG[id] == true,
+                Callback = function() if w then bind(id, w:Get() == true) end end })
+            setters[id] = function(v) w:Set(v == true) end
+            return w
+        end
+
+        local function SL(sec, id, name, mn, mx, dec, ending)
+            local w
+            w = sec:Slider({ Name = name, Flag = id, Min = mn, Max = mx,
+                Default = tonumber(CFG[id]) or mn, Decimal = dec or 1, Ending = ending or "",
+                Callback = function() if w then bind(id, w:Get()) end end })
+            setters[id] = function(v) w:Set(v) end
+            return w
+        end
+
+        local function DD(sec, id, name, opts)
+            local w
+            w = sec:Dropdown({ Name = name, Flag = id, Content = opts, Default = CFG[id],
+                Callback = function() if w then bind(id, w:Get()) end end })
+            setters[id] = function(v) w:Set(v) end
+            return w
+        end
+
+        -- the built in menu names keys its own way (Shift, Ctrl, LMB, MB5); the
+        -- library registers Roblox key code names, so translate before handing
+        -- it a key: an unknown name silently leaves the close key dead
+        local LIB_KEY = {
+            Shift = "LeftShift", Ctrl = "LeftControl", Alt = "LeftAlt",
+            LMB = "MouseButton1", RMB = "MouseButton2", MMB = "MouseButton3",
+            MB4 = "MouseButton4", MB5 = "MouseButton5",
+        }
+        local function closeKeyName(code)
+            local n = MenuLib.keyName(code)
+            if type(n) ~= "string" or n:sub(1, 2) == "0x" then return nil end
+            return LIB_KEY[n] or n
+        end
+
+        -- our key names are the built in menu's shorthand; the library wants
+        -- Roblox key code names, so keep both directions of the mapping
+        local VK_OF, LIB_OF = {}, {}
+        for code, nm in pairs(KEY_NAMES) do
+            local libName = LIB_KEY[nm] or nm
+            VK_OF[libName] = code
+            LIB_OF[code] = libName
+        end
+
+        -- a label with the library's own [KEY] addon: the row reads
+        -- "Activation key          [SHF]" and the key is rebound by clicking it
+        -- there, instead of a boxed button that looked nothing like it
+        local function KEY(sec, id, label)
+            local lb = sec:Label({ Message = label })
+            local kb
+            kb = lb:Keybind({
+                Flag = id .. "_bind",
+                Mode = "On hotkey",
+                UseMode = false,
+                Default = LIB_OF[CFG[id] or 0],
+                Callback = function()
+                    local nm = kb and kb:Get()
+                    local code = nm and VK_OF[nm]
+                    if not code then return end
+                    bind(id, code)
+                    -- the menu key also has to move the library's close bind
+                    if id == "menuKey" then
+                        pcall(function() Lib.UI.CloseBind = closeKeyName(code) or Lib.UI.CloseBind end)
+                    end
+                end,
+            })
+            setters[id] = function(v)
+                local nm = LIB_OF[v]
+                if nm and kb then pcall(function() kb:Set(nm) end) end
+            end
+            return lb
+        end
+
+        local Win = Lib:Window({ CloseBind = Enum.KeyCode.Insert })
+        pcall(function() Lib.UI.CloseBind = closeKeyName(CFG.menuKey or 0x08) or "Insert" end)
+
+        -- the library runs a generated rainbow image along the top edge of its
+        -- window and leaves no hook to recolour it, so cover that same 2px
+        -- strip with a blue gradient: one thin square per step, kept on top by
+        -- z-index and moved with the window as it is dragged or resized
+        local TOP_A, TOP_B = Color3.fromRGB(28, 74, 166), Color3.fromRGB(96, 156, 255)
+        local TOP_SEG = 96
+        local topLine, lastX, lastY, lastW = {}, nil, nil, nil
+        for i = 1, TOP_SEG do
+            local f = (i - 1) / (TOP_SEG - 1)
+            local sq = Drawing.new("Square")
+            sq.Filled = true
+            sq.Thickness = 1
+            sq.ZIndex = 4000
+            sq.Visible = false
+            sq.Color = Color3.new(
+                TOP_A.R + (TOP_B.R - TOP_A.R) * f,
+                TOP_A.G + (TOP_B.G - TOP_A.G) * f,
+                TOP_A.B + (TOP_B.B - TOP_A.B) * f)
+            topLine[i] = sq
+        end
+        -- followed every frame, not on a timer: a 30ms lag let the strip under
+        -- it show through as orange while the menu was being dragged
+        local RS = game:GetService("RunService")
+        RS.RenderStepped:Connect(function()
+            local win = Lib.UI and Lib.UI.MainUI
+            if not Lib.Running or not win or not win.Visible or (win.alpha or 1) <= 0.6 then
+                if lastX then
+                    lastX = nil
+                    for i = 1, TOP_SEG do topLine[i].Visible = false end
+                end
+                return
+            end
+            local bw0 = win.w - 14
+            if win.x ~= lastX or win.y ~= lastY or bw0 ~= lastW then
+                lastX, lastY, lastW = win.x, win.y, bw0
+                local bw = bw0 / TOP_SEG
+                for i = 1, TOP_SEG do
+                    local sq = topLine[i]
+                    -- two extra pixels of overlap swallow sub-frame lag too
+                    sq.Position = Vector2.new(math.floor(win.x + 7 + (i - 1) * bw), math.floor(win.y + 7))
+                    sq.Size = Vector2.new(math.max(1, math.ceil(bw) + 2), 2)
+                end
+            end
+            for i = 1, TOP_SEG do topLine[i].Visible = true end
+        end)
+
+        local Combat = Win:CreateTab({ Name = "COMBAT" })
+        local Weapons = Win:CreateTab({ Name = "WEAPONS" })
+        local Target = Win:CreateTab({ Name = "TARGET" })
+        local Behavior = Win:CreateTab({ Name = "BEHAVIOR" })
+        local Settings = Win:CreateTab({ Name = "SETTINGS" })
+        Win:SetTab(1)
+
+        do
+            local s = Box(Combat, "Triggerbot", 0, 12, 0, 12)
+            TG(s, "tb_enabled", "Enabled")
+            KEY(s, "tb_key", "Activation key")
+            DD(s, "tb_kbmode", "Mode", { "hold", "toggle", "always" })
+            TG(s, "tb_knock", "Knock check")
+
+            local h = Box(Combat, "Hitbox", 0, 12, 12, 12)
+            TG(h, "tb_visualize", "Visualize")
+            SL(h, "tb_maxdist", "Distance", 0, 2000, 1)
+            SL(h, "tb_hitbox_x", "Hitbox X", 0.1, 5.0, 0.1)
+            SL(h, "tb_hitbox_y", "Hitbox Y", 0.5, 8.0, 0.1)
+        end
+
+        do
+            -- left column: the weapon checks and every gun range; right column:
+            -- the gun macro and its macro guns
+            local w = Box(Weapons, "Weapon checks", 0, 12, 0, 9)
+            TG(w, "tb_wepcheck", "Enabled")
+            TG(w, "tb_rev_on", "Revolver")
+            TG(w, "tb_db_on", "Double barrel")
+            TG(w, "tb_tac_on", "Tac shotgun")
+
+            local m = Box(Weapons, "Gun macro", 12, 12, 0, 14)
+            TG(m, "gm_on", "Enabled")
+            KEY(m, "gm_key", "Activation key")
+            DD(m, "gm_mode", "Mode", { "hold", "toggle", "always" })
+            DD(m, "gm_method", "Method", { "keys", "equip" })
+            SL(m, "gm_delay", "Swap delay", 10, 400, 1, "ms")
+            TG(m, "gm_dist_on", "Distance based")
+            TG(m, "gm_link", "Link to triggerbot")
+            SL(m, "gm_link_ms", "Linger", 0, 500, 1, "ms")
+
+            local r = Box(Weapons, "Revolver", 0, 12, 9, 5)
+            SL(r, "tb_rev_dist", "Range", 20, 1000, 1)
+            local d = Box(Weapons, "Double barrel", 0, 12, 14, 5)
+            SL(d, "tb_db_dist", "Range", 20, 1000, 1)
+            local t = Box(Weapons, "Tac shotgun", 0, 12, 19, 5)
+            SL(t, "tb_tac_dist", "Range", 20, 1000, 1)
+
+            local g = Box(Weapons, "Macro guns", 12, 12, 14, 10)
+            TG(g, "gm_rev", "Revolver")
+            TG(g, "gm_db", "Double barrel")
+            TG(g, "gm_tac", "Tac shotgun")
+            SL(g, "gm_rev_slot", "Revolver slot", 1, 9, 1)
+            SL(g, "gm_db_slot", "Double barrel slot", 1, 9, 1)
+            SL(g, "gm_tac_slot", "Tac shotgun slot", 1, 9, 1)
+        end
+
+        do
+            local s = Box(Target, "Target", 0, 12, 0, 24)
+            TG(s, "tb_sticky", "Enabled")
+            KEY(s, "tb_selkey", "Select key")
+            KEY(s, "tb_unselkey", "Unselect key")
+            TG(s, "tb_selvis", "Target visuals")
+            TG(s, "esp_box", "Box")
+            TG(s, "esp_name", "Name")
+            TG(s, "esp_skel", "Skeleton")
+            TG(s, "esp_hp", "Health bar")
+            TG(s, "esp_shield", "Shield bar")
+            SL(s, "esp_dist", "Max dist", 0, 2000, 1)
+            s:Button({ Name = "reset targets", Confirmation = true,
+                Callback = function() pcall(clearSel) end })
+        end
+
+        do
+            local h = Box(Behavior, "Humanize", 0, 12, 0, 14)
+            TG(h, "tb_humanize", "Enabled")
+            SL(h, "tb_delay_min", "React min", 0, 500, 1, "ms")
+            SL(h, "tb_delay_max", "React max", 0, 500, 1, "ms")
+            SL(h, "tb_int_min", "Interval min", 0, 1000, 1, "ms")
+            SL(h, "tb_int_max", "Interval max", 0, 1000, 1, "ms")
+            SL(h, "tb_hold_min", "Hold min", 0, 300, 1, "ms")
+            SL(h, "tb_hold_max", "Hold max", 0, 300, 1, "ms")
+
+            local x = Box(Behavior, "Hesitation", 12, 12, 0, 12)
+            SL(x, "tb_hes_chance", "Chance", 0, 100, 1, "%")
+            SL(x, "tb_hes_min", "Min", 0, 2000, 1, "ms")
+            SL(x, "tb_hes_max", "Max", 0, 2000, 1, "ms")
+            SL(x, "tb_fatigue", "Fatigue", 0, 100, 1)
+        end
+
+        do
+            local p = Box(Settings, "Settings", 0, 12, 0, 12)
+            -- a text box reads Default, not Text, and only reports a new value
+            -- once the field is committed
+            local nameBox
+            nameBox = p:TextBox({ Flag = "cfgName", Max = 48,
+                Default = tostring(CFG.cfgName or "config1"),
+                Callback = function(v) if type(v) == "string" and #v > 0 then CFG.cfgName = v end end })
+            TG(p, "tb_autoload", "Auto load config")
+            KEY(p, "menuKey", "Menu key")
+
+            local list, refresh
+            local function clean(s)
+                return (tostring(s or ""):gsub("[^%w_%- ]", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+            end
+            -- after a load the widgets still hold the old values, so push CFG
+            -- back through every control that has a setter
+            local function sync()
+                for id, fn in pairs(setters) do
+                    local v = CFG[id]
+                    if v ~= nil then pcall(fn, v) end
+                end
+            end
+            local c = Box(Settings, "Saved configs", 12, 12, 0, 18)
+            refresh = function()
+                if not list then return end
+                local names = scanConfigs() or {}
+                pcall(function() list:Clear() end)
+                for i = 1, #names do pcall(function() list:AddValue(names[i]) end) end
+                if names[1] then pcall(function() list:Select(names[1]) end) end
+            end
+            list = c:List({ Flag = "cfgList", Size = 140 })
+            p:Button({ Name = "save config", Callback = function()
+                local typed = nameBox and nameBox:Get()
+                if type(typed) == "string" and #typed > 0 then CFG.cfgName = typed end
+                local n = clean(CFG.cfgName)
+                if #n == 0 then return end
+                CFG.cfgName = n
+                saveConfig(n)
+                setAutoName(n)
+                refresh()
+            end })
+            c:Button({ Name = "load config", Callback = function()
+                local n = list:Get()
+                if type(n) ~= "string" or not loadConfig(n) then return end
+                CFG.cfgName = n
+                setAutoName(n)
+                sync()
+                refresh()
+            end })
+            c:Button({ Name = "delete config", Confirmation = true, Callback = function()
+                local n = list:Get()
+                if type(n) ~= "string" then return end
+                pcall(delfile, cfgPath(n))
+                if getAutoName() == n then setAutoName("") end
+                if CFG.cfgName == n then CFG.cfgName = "config1" end
+                refresh()
+            end })
+            refresh()
+            -- push CFG into every control once, so a profile loaded before the
+            -- menu was built still shows its real values
+            sync()
+        end
+
+        return {
+            values = CFG,
+            on = function(id, fn) listeners[id] = fn end,
+            set = function(id, v)
+                CFG[id] = v
+                if setters[id] then pcall(setters[id], v) end
+            end,
+            get = function(id) return CFG[id] end,
+            redraw = function() end,
+            -- the gamesense buttons confirm destructive actions themselves
+            confirm = function(text) warn("[tb] confirm not used by the gamesense menu: " .. tostring(text)) end,
+            step = function() end,
+            setOpen = function(s) pcall(function() Win:SetVisible(s == true) end) end,
+            isOpen = function() return Win.Visible == true end,
+            toggle = function() pcall(function() Win:SetVisible(not Win.Visible) end) end,
+            tab = function() end,
+            currentTab = function() return 1 end,
+            bounds = function() return 0, 0, 0, 0 end,
+            hits = function() return {} end,
+            edit = function() end,
+            isEditing = function() return false end,
+            destroy = function()
+                pcall(function() Lib:Unload() end)
+                for i = 1, TOP_SEG do pcall(function() topLine[i]:Remove() end) end
+            end,
+        }
+    end
+    return nil
+end
+
+local menu = buildGamesense()
+if not menu and MenuLib then
 local okNew, m = pcall(MenuLib.new, {
     title = "Triggerbot",
     x = 60, y = 80, w = 660,
