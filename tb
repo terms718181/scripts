@@ -3237,10 +3237,11 @@ local function buildGamesense()
     end
 
     if Lib then
-        -- tab labels and headings are drawn with the library's bold face, and
-        -- that face is unset by default, so every "bold" label silently fell
-        -- back to the regular one. Setting it gives the labels real weight.
-        pcall(function() Lib:SetBoldFont("SystemBold") end)
+        -- no SetFont / SetBoldFont on purpose. The reference menu leaves both
+        -- faces alone, so its bold text is the library's own trick: the same
+        -- UI face drawn twice, one pixel apart. Naming a separate bold face
+        -- here swapped that for a different typeface on every bold label
+        -- (selected dropdown rows, section headers) and read as a wrong font.
 
         -- same palette as before: near black panels, teal accent
         pcall(function()
@@ -3835,7 +3836,7 @@ if menu then
         end
     end
 
-    local menuHooked = falsea
+    local menuHooked = false
     pcall(function()
         local rs = game:GetService("RunService")
         if rs and rs.RenderStepped then
